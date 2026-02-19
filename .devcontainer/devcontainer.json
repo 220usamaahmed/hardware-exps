@@ -1,0 +1,68 @@
+{
+    "name": "ros_container",
+    "privileged": true,
+    "remoteUser": "${localEnv:USER}",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            "USERNAME": "${localEnv:USER}",
+            "DOCKER_REPO": "osrf/ros",
+            "ROS_DISTRO": "humble",
+            "IMAGE_SUFFIX": "-desktop-full"
+        }
+    },
+    "workspaceFolder": "/home/${localEnv:USER}/ros2",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/${localEnv:USER}/ros2,type=bind",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-themes",
+                "twxs.cmake",
+                "donjayamanne.python-extension-pack",
+                "eamodio.gitlens",
+                "ms-iot.vscode-ros"
+            ]
+        }
+    },
+    "containerEnv": {
+        "ROS_DOMAIN_ID": "60",
+        "XAUTHORITY": "/home/${localEnv:USER}/.Xauthority",
+        "QT_X11_NO_MITSHM": "1",
+        "XDG_RUNTIME_DIR": "/tmp/runtime-${localEnv:USER}"
+    },
+    "runArgs": [
+        "--privileged",
+        "--net=host",
+        "-e",
+        "DISPLAY=${localEnv:DISPLAY}",
+        "--gpus", "all",
+
+        "-v", "/dev:/dev",
+        "-v", "/run/udev:/run/udev",
+        "-v", "/etc/udev/rules.d:/etc/udev/rules.d",
+        "--device=/dev/ttyUSB0:/dev/ttyUSB0",
+        "--device=/dev/video0:/dev/video0",
+        "--device=/dev/video1:/dev/video1",
+        "--device=/dev/video2:/dev/video2",
+        "--device=/dev/video3:/dev/video3",
+        "--device=/dev/video4:/dev/video4",
+        "--device=/dev/video5:/dev/video5",
+        "--device=/dev/video6:/dev/video6",
+        "--device=/dev/video7:/dev/video7",
+        "--device=/dev/video8:/dev/video8",
+        "--device=/dev/video9:/dev/video9",
+        "--device=/dev/video10:/dev/video10",
+        "--device=/dev/video11:/dev/video11",
+        "--device=/dev/video12:/dev/video12",
+        "--device=/dev/video13:/dev/video13",
+        "--device=/dev/bus/usb:/dev/bus/usb"
+    ],
+    "mounts": [
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+        "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.ssh,target=/home/${localEnv:USER}/.ssh,type=bind"
+    ],
+    "initializeCommand": "sh ./.devcontainer/initialize.sh",
+    "postCreateCommand": "bash ./.devcontainer/postCreate.sh"
+}
