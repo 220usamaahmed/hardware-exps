@@ -24,3 +24,27 @@ ros2 run ecpmi_gripper gripper_client release
 ros2 run ecpmi_gripper gripper_client blow
 
 ```
+
+Go to the wrapper repo and fetch tags:
+
+cd ~/ros2/object_placement/zed_ws/src/zed-ros2-wrapper
+git fetch --all --tags
+Check out the SDK‑5.0 compatible tag:
+
+git checkout humble-v5.0.0
+Clean and rebuild the ZED workspace:
+
+cd ~/ros2/object_placement/zed_ws
+rm -rf build install log
+colcon build --symlink-install --cmake-args=-DCMAKE_BUILD_TYPE=Release
+
+Terminal 1:
+
+source ~/ros2/object_placement/zed_ws/install/local_setup.bash
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2i
+Terminal 2:
+
+source ~/ros2/object_placement/zed_ws/install/local_setup.bash
+rviz2
+
+xhost +local:docker

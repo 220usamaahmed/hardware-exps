@@ -33,14 +33,12 @@
     },
     "runArgs": [
         "--privileged",
-        "--net=host",
-        "-e",
-        "DISPLAY=${localEnv:DISPLAY}",
-        "--gpus", "all",
-
         "-v", "/dev:/dev",
         "-v", "/run/udev:/run/udev",
         "-v", "/etc/udev/rules.d:/etc/udev/rules.d",
+        "--net=host",
+        "-e", "DISPLAY=${env:DISPLAY}",
+        "--gpus", "all",
         "--device=/dev/ttyUSB0:/dev/ttyUSB0",
         "--device=/dev/video0:/dev/video0",
         "--device=/dev/video1:/dev/video1",
