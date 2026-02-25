@@ -157,13 +157,13 @@ class DatasetRecorder(Node):
         )
 
         output_path = os.path.join(self._session_dir, "dataset.npz")
-        np.savez(
-            output_path,
-            observations=obs,
-            actions=act,
-            timestamps=ts,
-            depth_frames=depth_frames,
-        )
+        # np.savez(
+        #     output_path,
+        #     observations=obs,
+        #     actions=act,
+        #     timestamps=ts,
+        #     depth_frames=depth_frames,
+        # )
 
         response.success = True
         response.message = f"Saved dataset to {output_path}"
@@ -194,8 +194,8 @@ class DatasetRecorder(Node):
         if depth_array is None:
             return
         
-        print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
-        print(f"  Joint positions: {observation[:6]}")
+        # print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
+        # print(f"  Joint positions: {observation[:6]}")
 
         self._observations.append(observation)
         self._actions.append(action)
@@ -224,7 +224,7 @@ class DatasetRecorder(Node):
             # self._latest_gripper_state,
             self._latest_depth,
         ):
-            print(f"Latest {type(latest.msg).__name__} timestamp difference: {abs(now_sec - latest.stamp_sec):.3f} sec")
+            # print(f"Latest {type(latest.msg).__name__} timestamp difference: {abs(now_sec - latest.stamp_sec):.3f} sec")
             if abs(now_sec - latest.stamp_sec) > self._sync_tolerance_sec:
                 return False
         return True

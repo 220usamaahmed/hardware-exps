@@ -38,9 +38,9 @@ class TrajectoryControl(Node):
         self.declare_parameter("recorder_start_service", "/dataset_recorder/start")
         self.declare_parameter("recorder_stop_service", "/dataset_recorder/stop")
         # Joint-space controller gains and limits (for joint velocities)
-        self.declare_parameter("k_p_joint", 1.2)
-        self.declare_parameter("max_joint_speed", 0.75)  # rad/s
-        self.declare_parameter("joint_tolerance", 0.05)  # rad
+        self.declare_parameter("k_p_joint", 6.0)
+        self.declare_parameter("max_joint_speed", 1.5)  # rad/s
+        self.declare_parameter("joint_tolerance", 0.1)  # rad
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -148,10 +148,10 @@ class TrajectoryControl(Node):
         """Build mixed waypoint + gripper command sequence."""
 
         # Waypoints are specified in degrees and converted to radians.
-        home = [90.00, 0.00, 0.00, 0.00, 0.00, 90.00]
+        home = [-90.00, 0.00, -90.00, 0.00, -0.00, 90.00]
         
-        lb_before_gripping = [100.0, 80.0, 180.0, 10.0, 66.0, 10.0]
-        lb_gripping = [107.0, -56.0, 80.0, -23.0, -253.0, 90.0]
+        lb_gripping_back = [-168.0, 67.0, -260.0, -30.0, 0.0, -26.0]
+        lb_gripping = [-154.0, 19.0, -226.0, -43.0, 0.0, -39.0]
         lb_after_pulling = [120.0, -80.0, 115.0, -35.0, 240.0, 90.0]
 
         def to_rad(waypoint_deg: JointWaypoint) -> JointWaypoint:
@@ -160,12 +160,14 @@ class TrajectoryControl(Node):
         return [
             Step(kind="waypoint", waypoint=to_rad(home)),
             
-            Step(kind="waypoint", waypoint=to_rad(lb_before_gripping)),
-            
-            Step(kind="waypoint", waypoint=to_rad(home)),
+            Step(kind="waypoint", waypoint=to_rad(lb_gripping_back)),
+            Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
+            Step(kind="waypoint", waypoint=to_rad(lb_gripping_back)),
             
             # Step(kind="waypoint", waypoint=to_rad(home)),
-            # Step(kind="waypoint", waypoint=to_rad(lb_before_gripping)),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="waypoint", waypoint=to_rad(lb_gripping_back)),
             # Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
             # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
             # Step(kind="gripper", gripper_command="release", wait_sec=1.0),
@@ -317,11 +319,11 @@ class TrajectoryControl(Node):
             )
             return
 
-        # Joint error and norm
+        # Joint error and norm (wrapped to shortest angular distance)
         errors: List[float] = []
         max_err = 0.0
         for current, goal in zip(self._current_joints, target):
-            e = goal - current
+            e = math.atan2(math.sin(goal - current), math.cos(goal - current))
             errors.append(e)
             max_err = max(max_err, abs(e))
 
@@ -345,11 +347,14 @@ class TrajectoryControl(Node):
             if abs(v) > self._max_joint_speed > 0.0:
                 v = math.copysign(self._max_joint_speed, v)
             velocities.append(v)
+            
+        # self.get_logger().info(f"Errors: {errors}")
+        # self.get_logger().info(f"Velocities: {velocities}")
 
         if any(abs(v) > 0.0 for v in velocities):
             if self._last_vel_log_sec is None or now_sec - self._last_vel_log_sec >= 1.0:
                 self._last_vel_log_sec = now_sec
-                # self.get_logger().info(f"Joint velocities: {velocities}")
+                self.get_logger().info(f"Joint velocities: {velocities}")
         self._publish_joint_command(velocities)
 
     def _handle_gripper_step(self, step: Step) -> None:
