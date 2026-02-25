@@ -75,3 +75,5 @@ Decisions
 Use a dedicated recorder node for synchronization and NPZ+image output; rosbag2 is optional for raw replay but not required for your target format.
 Publish gripper state on a topic from the controller, since gripper commands are currently only services.
 If you want, I can refine this plan once you choose a specific sample rate and file naming scheme.
+
+NEURAL_LIGHT

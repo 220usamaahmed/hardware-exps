@@ -1,4 +1,5 @@
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -57,12 +58,12 @@ class TrajectoryControl(Node):
 
         # UR3e joint order used by MoveIt (and Servo)
         self._joint_names: List[str] = [
-            "shoulder_pan_joint",
             "shoulder_lift_joint",
             "elbow_joint",
             "wrist_1_joint",
             "wrist_2_joint",
             "wrist_3_joint",
+            "shoulder_pan_joint",
         ]
 
         # Hardcoded mixed sequence (waypoints + gripper commands).
@@ -147,9 +148,9 @@ class TrajectoryControl(Node):
         """Build mixed waypoint + gripper command sequence."""
 
         # Waypoints are specified in degrees and converted to radians.
-        home = [90.0, -90.0, 0.0, 0.0, 0.0, 0.0]
+        home = [90.00, 0.00, 0.00, 0.00, 0.00, 90.00]
         
-        lb_before_gripping = [111.0, -67.0, 97.0, -30.0, 110.0, 90.0]
+        lb_before_gripping = [100.0, 80.0, 180.0, 10.0, 66.0, 10.0]
         lb_gripping = [107.0, -56.0, 80.0, -23.0, -253.0, 90.0]
         lb_after_pulling = [120.0, -80.0, 115.0, -35.0, 240.0, 90.0]
 
@@ -157,15 +158,20 @@ class TrajectoryControl(Node):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
 
         return [
-            # Step(kind="waypoint", waypoint=to_rad(home)),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
             Step(kind="waypoint", waypoint=to_rad(lb_before_gripping)),
+            
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="waypoint", waypoint=to_rad(lb_before_gripping)),
             # Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
-            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            Step(kind="gripper", gripper_command="release", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="release", wait_sec=1.0),
             # Step(kind="waypoint", waypoint=to_rad(lb_after_pulling)),
             # Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
-            Step(kind="waypoint", waypoint=to_rad(home)),
-            Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
+            # Step(kind="waypoint", waypoint=to_rad(home)),s_sec=1.0),
         ]
 
     def _try_start_servo(self) -> None:
@@ -225,6 +231,8 @@ class TrajectoryControl(Node):
         self._set_gripper_state(0)
         if self._start_servo_timer is not None:
             self._start_servo_timer.cancel()
+        if self._recorder_start_timer is not None:
+            self._recorder_start_timer.cancel()
         if self._control_timer is not None:
             self._control_timer.cancel()
         self._request_recorder_stop()
@@ -241,12 +249,13 @@ class TrajectoryControl(Node):
         self._recorder_stop_future = self._recorder_stop_client.call_async(
             Trigger.Request()
         )
-        self._shutdown_deadline_sec = self.get_clock().now().nanoseconds / 1e9 + 2.0
+        # Use wall time for shutdown timeout to avoid stalled /clock.
+        self._shutdown_deadline_sec = time.time() + 2.0
         if self._shutdown_timer is None:
             self._shutdown_timer = self.create_timer(0.1, self._check_shutdown_ready)
 
     def _check_shutdown_ready(self) -> None:
-        now_sec = self.get_clock().now().nanoseconds / 1e9
+        now_sec = time.time()
         if self._recorder_stop_future is not None and self._recorder_stop_future.done():
             try:
                 response = self._recorder_stop_future.result()

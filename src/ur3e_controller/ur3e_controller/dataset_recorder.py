@@ -69,7 +69,7 @@ class DatasetRecorder(Node):
         self._observations: List[np.ndarray] = []
         self._actions: List[np.ndarray] = []
         self._timestamps: List[float] = []
-        self._depth_files: List[str] = []
+        self._depth_frames: List[np.ndarray] = []
 
         self.create_subscription(
             JointState, self._joint_states_topic, self._on_joint_state, 10
@@ -127,7 +127,7 @@ class DatasetRecorder(Node):
         self._observations.clear()
         self._actions.clear()
         self._timestamps.clear()
-        self._depth_files.clear()
+        self._depth_frames.clear()
         self._recording = True
 
         response.success = True
@@ -150,7 +150,11 @@ class DatasetRecorder(Node):
         obs = np.stack(self._observations) if self._observations else np.zeros((0, 9))
         act = np.stack(self._actions) if self._actions else np.zeros((0, 9))
         ts = np.asarray(self._timestamps, dtype=np.float64)
-        depth_files = np.asarray(self._depth_files, dtype=object)
+        depth_frames = (
+            np.stack(self._depth_frames)
+            if self._depth_frames
+            else np.zeros((0, 0, 0))
+        )
 
         output_path = os.path.join(self._session_dir, "dataset.npz")
         np.savez(
@@ -158,7 +162,7 @@ class DatasetRecorder(Node):
             observations=obs,
             actions=act,
             timestamps=ts,
-            depth_files=depth_files,
+            depth_frames=depth_frames,
         )
 
         response.success = True
@@ -167,10 +171,10 @@ class DatasetRecorder(Node):
         return response
 
     def _sample(self) -> None:
-        print("Sampling dataset...")
+        # print("Sampling dataset...")
         
         if not self._recording:
-            print("Not recording, skipping sample.")
+            # print("Not recording, skipping sample.")
             return
 
         now_sec = self._now_sec()
@@ -186,8 +190,8 @@ class DatasetRecorder(Node):
         observation = self._build_observation(joint_state, gripper_state)
         action = self._build_action(joint_cmd, gripper_state)
 
-        depth_filename = self._save_depth(depth)
-        if depth_filename is None:
+        depth_array = self._image_to_array(depth)
+        if depth_array is None:
             return
         
         print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
@@ -196,7 +200,7 @@ class DatasetRecorder(Node):
         self._observations.append(observation)
         self._actions.append(action)
         self._timestamps.append(now_sec)
-        self._depth_files.append(depth_filename)
+        self._depth_frames.append(depth_array)
 
     def _inputs_ready(self, now_sec: float) -> bool:
         if (
@@ -263,20 +267,6 @@ class DatasetRecorder(Node):
         elif state == 3:
             onehot[2] = 1.0
         return onehot
-
-    def _save_depth(self, msg: Image) -> Optional[str]:
-        if self._session_dir is None:
-            return None
-
-        array = self._image_to_array(msg)
-        if array is None:
-            return None
-
-        filename = f"depth_{self._frame_index:06d}.npy"
-        path = os.path.join(self._session_dir, filename)
-        np.save(path, array)
-        self._frame_index += 1
-        return filename
 
     def _image_to_array(self, msg: Image) -> Optional[np.ndarray]:
         if msg.encoding == "32FC1":
