@@ -7,3 +7,7 @@
 # Ignore all files in src except for ur3e_controller
 /src/*
 !/src/ur3e_controller
+
+**/__pycache__
+
+datasets/

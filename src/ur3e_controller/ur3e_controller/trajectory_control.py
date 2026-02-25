@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
+from std_msgs.msg import UInt8
 from control_msgs.msg import JointJog
 from ecpmi_gripper.srv import GripperControl
 
@@ -32,9 +33,12 @@ class TrajectoryControl(Node):
         self.declare_parameter("auto_start_servo", True)
         self.declare_parameter("start_servo_service", "/servo_node/start_servo")
         self.declare_parameter("gripper_service", "/gripper_control")
+        self.declare_parameter("gripper_state_topic", "/gripper_state")
+        self.declare_parameter("recorder_start_service", "/dataset_recorder/start")
+        self.declare_parameter("recorder_stop_service", "/dataset_recorder/stop")
         # Joint-space controller gains and limits (for joint velocities)
         self.declare_parameter("k_p_joint", 1.2)
-        self.declare_parameter("max_joint_speed", 1.5)  # rad/s
+        self.declare_parameter("max_joint_speed", 0.75)  # rad/s
         self.declare_parameter("joint_tolerance", 0.05)  # rad
 
         self._command_topic = str(self.get_parameter("command_topic").value)
@@ -42,6 +46,11 @@ class TrajectoryControl(Node):
         self._auto_start_servo = bool(self.get_parameter("auto_start_servo").value)
         self._start_servo_service = str(self.get_parameter("start_servo_service").value)
         self._gripper_service = str(self.get_parameter("gripper_service").value)
+        self._gripper_state_topic = str(self.get_parameter("gripper_state_topic").value)
+        self._recorder_start_service = str(
+            self.get_parameter("recorder_start_service").value
+        )
+        self._recorder_stop_service = str(self.get_parameter("recorder_stop_service").value)
         self._k_p_joint = float(self.get_parameter("k_p_joint").value)
         self._max_joint_speed = float(self.get_parameter("max_joint_speed").value)
         self._joint_tolerance = float(self.get_parameter("joint_tolerance").value)
@@ -67,44 +76,95 @@ class TrajectoryControl(Node):
         self._gripper_future: Optional[rclpy.task.Future] = None
         self._gripper_wait_sec = 0.0
         self._last_vel_log_sec: Optional[float] = None
+        self._gripper_state = 0
+        self._recorder_start_timer = None
+        self._recorder_stop_future: Optional[rclpy.task.Future] = None
+        self._shutdown_deadline_sec: Optional[float] = None
+        self._shutdown_timer = None
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
+        self._gripper_state_pub = self.create_publisher(
+            UInt8, self._gripper_state_topic, 10
+        )
         self._joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
         self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
         self._gripper_client = self.create_client(GripperControl, self._gripper_service)
+        self._recorder_start_client = self.create_client(
+            Trigger, self._recorder_start_service
+        )
+        self._recorder_stop_client = self.create_client(
+            Trigger, self._recorder_stop_service
+        )
         self._start_servo_timer = None
         if self._auto_start_servo:
             self._start_servo_timer = self.create_timer(1.0, self._try_start_servo)
+        self._recorder_start_timer = self.create_timer(1.0, self._try_start_recorder)
 
         self._control_timer = self.create_timer(self._control_period, self._control_step)
+
+        self._publish_gripper_state(self._gripper_state)
 
         self.get_logger().info(
             f"TrajectoryControl ready. Publishing joint commands on {self._command_topic} now"
         )
 
+    def _publish_gripper_state(self, state: int) -> None:
+        msg = UInt8()
+        msg.data = int(state)
+        self._gripper_state_pub.publish(msg)
+
+    def _set_gripper_state(self, state: int) -> None:
+        if self._gripper_state != state:
+            self._gripper_state = state
+            self._publish_gripper_state(state)
+
+    def _try_start_recorder(self) -> None:
+        if not self._recorder_start_client.wait_for_service(timeout_sec=0.1):
+            self.get_logger().warn(
+                f"Waiting for dataset recorder start service at {self._recorder_start_service}"
+            )
+            return
+        future = self._recorder_start_client.call_async(Trigger.Request())
+        future.add_done_callback(self._handle_start_recorder)
+
+    def _handle_start_recorder(self, future: rclpy.task.Future) -> None:
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"Failed to call recorder start: {exc}")
+            return
+        if response.success:
+            self.get_logger().info("Dataset recorder started.")
+            if self._recorder_start_timer is not None:
+                self._recorder_start_timer.cancel()
+        else:
+            self.get_logger().warn(f"Recorder start failed: {response.message}")
+
     def _make_steps(self) -> List[Step]:
         """Build mixed waypoint + gripper command sequence."""
 
         # Waypoints are specified in degrees and converted to radians.
-        home = [0.0, -90.0, 0.0, 0.0, 0.0, 0.0]
+        home = [90.0, -90.0, 0.0, 0.0, 0.0, 0.0]
         
-        lb_before_gripping = [110.0, -40.0, 80.0, -40.0, 110.0, -2.0]
-        lb_gripping = [110.0, -38.0, 76.0, -37.0, 110.0, -2.0]
-        lb_after_pulling = [119.0, -53.0, 108.0, -54.0, 119.0, -2.0]
+        lb_before_gripping = [111.0, -67.0, 97.0, -30.0, 110.0, 90.0]
+        lb_gripping = [107.0, -56.0, 80.0, -23.0, -253.0, 90.0]
+        lb_after_pulling = [120.0, -80.0, 115.0, -35.0, 240.0, 90.0]
 
         def to_rad(waypoint_deg: JointWaypoint) -> JointWaypoint:
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
 
         return [
-            Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
             Step(kind="waypoint", waypoint=to_rad(lb_before_gripping)),
-            Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
+            # Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
             Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
             Step(kind="gripper", gripper_command="release", wait_sec=1.0),
-            Step(kind="waypoint", waypoint=to_rad(lb_after_pulling)),
+            # Step(kind="waypoint", waypoint=to_rad(lb_after_pulling)),
+            # Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
+            Step(kind="waypoint", waypoint=to_rad(home)),
             Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
         ]
 
@@ -162,11 +222,47 @@ class TrajectoryControl(Node):
     def _finish_and_shutdown(self) -> None:
         self._completed = True
         self._publish_joint_command([0.0] * len(self._joint_names))
+        self._set_gripper_state(0)
         if self._start_servo_timer is not None:
             self._start_servo_timer.cancel()
         if self._control_timer is not None:
             self._control_timer.cancel()
-        rclpy.shutdown()
+        self._request_recorder_stop()
+
+    def _request_recorder_stop(self) -> None:
+        if self._recorder_stop_future is not None:
+            return
+        if not self._recorder_stop_client.wait_for_service(timeout_sec=0.1):
+            self.get_logger().warn(
+                f"Recorder stop service unavailable at {self._recorder_stop_service}. Shutting down anyway."
+            )
+            rclpy.shutdown()
+            return
+        self._recorder_stop_future = self._recorder_stop_client.call_async(
+            Trigger.Request()
+        )
+        self._shutdown_deadline_sec = self.get_clock().now().nanoseconds / 1e9 + 2.0
+        if self._shutdown_timer is None:
+            self._shutdown_timer = self.create_timer(0.1, self._check_shutdown_ready)
+
+    def _check_shutdown_ready(self) -> None:
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        if self._recorder_stop_future is not None and self._recorder_stop_future.done():
+            try:
+                response = self._recorder_stop_future.result()
+                if response.success:
+                    self.get_logger().info("Dataset recorder stopped.")
+                else:
+                    self.get_logger().warn(
+                        f"Recorder stop failed: {response.message}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"Failed to stop recorder: {exc}")
+            rclpy.shutdown()
+            return
+        if self._shutdown_deadline_sec is not None and now_sec >= self._shutdown_deadline_sec:
+            self.get_logger().warn("Recorder stop timeout. Shutting down.")
+            rclpy.shutdown()
 
     def _control_step(self) -> None:
         # If no steps or already completed, send zero joint velocity
@@ -197,6 +293,8 @@ class TrajectoryControl(Node):
         if step.kind != "waypoint" or step.waypoint is None:
             self._abort_with_error("Invalid step configuration; stopping node.")
             return
+
+        self._set_gripper_state(0)
 
         # Need a valid joint state before we can move
         if self._current_joints is None:
@@ -247,6 +345,9 @@ class TrajectoryControl(Node):
 
     def _handle_gripper_step(self, step: Step) -> None:
         self._publish_joint_command([0.0] * len(self._joint_names))
+
+        command_map = {"grip": 1, "release": 2, "blow": 3}
+        self._set_gripper_state(command_map.get(step.gripper_command or "", 0))
 
         if self._gripper_future is None:
             if not self._gripper_client.wait_for_service(timeout_sec=0.1):

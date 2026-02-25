@@ -11,7 +11,7 @@ setup(
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'numpy'],
     zip_safe=True,
     maintainer='user',
     maintainer_email='user@todo.todo',
@@ -23,6 +23,7 @@ setup(
             'data_collection = ur3e_controller.data_collection:main',
             'trajectory_control_test = ur3e_controller.trajectory_control_test:main',
             'trajectory_control = ur3e_controller.trajectory_control:main',
+            'dataset_recorder = ur3e_controller.dataset_recorder:main',
         ],
     },
 )
