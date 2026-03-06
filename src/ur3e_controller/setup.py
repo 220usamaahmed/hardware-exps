@@ -24,6 +24,7 @@ setup(
             'trajectory_control_test = ur3e_controller.trajectory_control_test:main',
             'trajectory_control = ur3e_controller.trajectory_control:main',
             'dataset_recorder = ur3e_controller.dataset_recorder:main',
+            'imitation_control = ur3e_controller.imitation_control:main',
         ],
     },
 )

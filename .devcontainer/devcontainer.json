@@ -59,7 +59,8 @@
     "mounts": [
         "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
         "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached",
-        "source=${localEnv:HOME}/.ssh,target=/home/${localEnv:USER}/.ssh,type=bind"
+        "source=${localEnv:HOME}/.ssh,target=/home/${localEnv:USER}/.ssh,type=bind",
+        // "source=/media/siddiquieu1/AHMED/ur3e-trajectories,target=/home/${localEnv:USER}/ur3e-trajectories,type=bind,consistency=cached"
     ],
     "initializeCommand": "sh ./.devcontainer/initialize.sh",
     "postCreateCommand": "bash ./.devcontainer/postCreate.sh"

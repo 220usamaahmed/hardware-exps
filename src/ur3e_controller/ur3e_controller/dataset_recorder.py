@@ -22,9 +22,9 @@ class DatasetRecorder(Node):
     def __init__(self) -> None:
         super().__init__("dataset_recorder")
 
-        self.declare_parameter("sample_rate_hz", 30.0)
+        self.declare_parameter("sample_rate_hz", 15.0)
         self.declare_parameter("sync_tolerance_sec", 0.2)
-        self.declare_parameter("output_dir", "datasets")
+        self.declare_parameter("output_dir", "/home/siddiquieu1/ur3e-trajectories")
         self.declare_parameter("joint_names", [
             "shoulder_pan_joint",
             "shoulder_lift_joint",
@@ -90,7 +90,9 @@ class DatasetRecorder(Node):
         period = 1.0 / self._sample_rate_hz if self._sample_rate_hz > 0 else 0.0333
         self._timer = self.create_timer(period, self._sample)
 
-        self.get_logger().info("DatasetRecorder ready.")
+        self.get_logger().info("DatasetRecorder ready. Recording at {:.2f} Hz with sync tolerance of {:.2f} sec.".format(
+            self._sample_rate_hz, self._sync_tolerance_sec
+        ))
 
     def _now_sec(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
@@ -121,7 +123,7 @@ class DatasetRecorder(Node):
             return response
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._session_dir = os.path.join(self._output_dir, f"session_{timestamp}")
+        self._session_dir = os.path.join(self._output_dir, f"open_drawer_left_{timestamp}")
         os.makedirs(self._session_dir, exist_ok=True)
         self._frame_index = 0
         self._observations.clear()
@@ -157,13 +159,13 @@ class DatasetRecorder(Node):
         )
 
         output_path = os.path.join(self._session_dir, "dataset.npz")
-        # np.savez(
-        #     output_path,
-        #     observations=obs,
-        #     actions=act,
-        #     timestamps=ts,
-        #     depth_frames=depth_frames,
-        # )
+        np.savez(
+            output_path,
+            observations=obs,
+            actions=act,
+            timestamps=ts,
+            depth_frames=depth_frames,
+        )
 
         response.success = True
         response.message = f"Saved dataset to {output_path}"
