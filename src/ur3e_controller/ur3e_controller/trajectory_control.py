@@ -41,7 +41,8 @@ class TrajectoryControl(Node):
         self.declare_parameter("record", True)
         # Joint-space controller gains and limits (for joint velocities)
         self.declare_parameter("k_p_joint", 2.0)
-        self.declare_parameter("max_joint_speed", 1.5)  # rad/s
+        # self.declare_parameter("max_joint_speed", 1.5)  # rad/s
+        self.declare_parameter("max_joint_speed", 0.5)  # rad/s
         self.declare_parameter("joint_tolerance", 0.1)  # rad
         self.declare_parameter("min_joint_speed", 0.02)  # rad/s
 
@@ -208,24 +209,26 @@ class TrajectoryControl(Node):
         # ]
 
         return [
-            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-            Step(kind="recorder_start"),
-            
-            Step(kind="waypoint", waypoint=to_rad(lb_gripping_prepare)),
-            Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
-            
-            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            Step(kind="gripper", gripper_command="release", wait_sec=1.0),
-            
-            Step(kind="waypoint", waypoint=to_rad(lb_gripping_pull)),
-            
-            Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
-            
-            # Step(kind="waypoint", waypoint=to_rad(lb_gripper_backoff)),
             Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            
+            # Step(kind="recorder_start"),
+            
+            # Step(kind="waypoint", waypoint=to_rad(lb_gripping_prepare)),
+            # Step(kind="waypoint", waypoint=to_rad(lb_gripping)),
+            
+            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="release", wait_sec=1.0),
+            
+            # Step(kind="waypoint", waypoint=to_rad(lb_gripping_pull)),
+            
+            # Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
+            
+            # # Step(kind="waypoint", waypoint=to_rad(lb_gripper_backoff)),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
 
-            Step(kind="recorder_stop"),
+            # Step(kind="recorder_stop"),
         ]
 
     def _try_start_servo(self) -> None:

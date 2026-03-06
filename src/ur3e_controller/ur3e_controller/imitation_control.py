@@ -494,6 +494,8 @@ class ImitationControl(Node):
         if not normalized:
             self.get_logger().warn("Model returned no valid actions.")
             return
+        
+        normalized = actions
 
         for action in normalized[: self._action_execute_count]:
             print("queuing action", action)
@@ -525,6 +527,7 @@ class ImitationControl(Node):
             # Temporary fallback: publish zeros when inference is late.
             # Replace this with a hold-last-action policy if needed.
             action = [0.0] * (len(self._joint_names) + 1)
+            action[-1] = -1
 
         if self._last_action_time_sec is not None:
             if now_sec - self._last_action_time_sec > self._command_timeout_sec:
@@ -575,7 +578,7 @@ class ImitationControl(Node):
             return
 
         self._gripper_sequence_active = True
-        # self._gripper_state = 1.0
+        self._gripper_state = 1.0
 
         if self._gripper_release_timer is not None:
             self._gripper_release_timer.cancel()
