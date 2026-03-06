@@ -9,6 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from std_srvs.srv import Trigger
 from control_msgs.msg import JointJog
+from ecpmi_gripper.srv import GripperControl
 from concurrent.futures import Future, ThreadPoolExecutor
 import torch
 import torch.nn as nn
@@ -207,14 +208,14 @@ class ConditionalDiffusionModel(nn.Module):
     def forward(self, depth_images , non_visual_obs, noisy_action, t):
         depth_images = torch.nan_to_num(depth_images, nan=0.0)
         
-        print("depth_images shape == " , depth_images.shape)
+        # print("depth_images shape == " , depth_images.shape)
         
         # print("-"*50)
         # print(depth_images)
         # print("-"*50)
         
-        print("depth image min: ", depth_images.min().item(), " max: ", depth_images.max().item())
-        print("non-visual obs min: ", non_visual_obs.min().item(), " max: ", non_visual_obs.max().item())
+        # print("depth image min: ", depth_images.min().item(), " max: ", depth_images.max().item())
+        # print("non-visual obs min: ", non_visual_obs.min().item(), " max: ", non_visual_obs.max().item())
 
         batch_size=non_visual_obs.shape[0]
         context_length=non_visual_obs.shape[1]
@@ -286,6 +287,7 @@ class ImitationControl(Node):
         self.declare_parameter("max_joint_speed", 1.5)
         self.declare_parameter("auto_start_servo", True)
         self.declare_parameter("start_servo_service", "/servo_node/start_servo")
+        self.declare_parameter("gripper_service", "/gripper_control")
         self.declare_parameter("command_timeout_sec", 0.5)
         self.declare_parameter("joint_names", [
             "shoulder_pan_joint",
@@ -313,6 +315,7 @@ class ImitationControl(Node):
         self._start_servo_service = str(
             self.get_parameter("start_servo_service").value
         )
+        self._gripper_service = str(self.get_parameter("gripper_service").value)
         self._command_timeout_sec = float(
             self.get_parameter("command_timeout_sec").value
         )
@@ -327,12 +330,18 @@ class ImitationControl(Node):
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._last_action_time_sec: Optional[float] = None
         self._last_drop_log_sec: Optional[float] = None
+        self._gripper_state = 0.0
+        self._last_gripper_signal: Optional[int] = None
+        self._gripper_sequence_active = False
+        self._gripper_future: Optional[rclpy.task.Future] = None
+        self._gripper_release_timer = None
 
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
         self.create_subscription(
             JointState, self._joint_states_topic, self._on_joint_state, 10
         )
         self.create_subscription(Image, self._depth_topic, self._on_depth, 10)
+        self._gripper_client = self.create_client(GripperControl, self._gripper_service)
 
         self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
         self._start_servo_timer = None
@@ -435,8 +444,10 @@ class ImitationControl(Node):
             return
 
         joints = self._extract_joint_vector(self._latest_joint_state.msg)
-        joints = self._extract_joint_vector(self._latest_joint_state.msg)
-        joints = np.append(joints, 0.0)
+        joints = np.append(joints, float(self._gripper_state))
+        
+        print("observation", joints)
+        
         depth = self._image_to_array(self._latest_depth.msg)
         if depth is None:
             return
@@ -485,6 +496,7 @@ class ImitationControl(Node):
             return
 
         for action in normalized[: self._action_execute_count]:
+            print("queuing action", action)
             self._action_queue.append(action)
 
     def _normalize_actions(self, actions: Sequence[Sequence[float]]) -> List[List[float]]:
@@ -496,29 +508,100 @@ class ImitationControl(Node):
 
         normalized: List[List[float]] = []
         for idx, action in enumerate(actions[: self._action_horizon]):
-            if len(action) != len(self._joint_names):
+            if len(action) != len(self._joint_names) + 1:
                 self.get_logger().warn(
-                    f"Action {idx} length {len(action)} does not match {len(self._joint_names)} joints."
+                    f"Action {idx} length {len(action)} does not match {len(self._joint_names) + 1} actions."
                 )
                 return []
-            normalized.append([float(v) for v in action])
+            joint_values = [float(v) for v in action[: len(self._joint_names)]]
+            gripper_value = action[len(self._joint_names)]
+            normalized.append(joint_values + [gripper_value])
         return normalized
 
     def _publish_next_action(self, now_sec: float) -> None:
         if self._action_queue:
-            velocities = self._action_queue.popleft()
+            action = self._action_queue.popleft()
         else:
             # Temporary fallback: publish zeros when inference is late.
             # Replace this with a hold-last-action policy if needed.
-            velocities = [0.0] * len(self._joint_names)
+            action = [0.0] * (len(self._joint_names) + 1)
 
         if self._last_action_time_sec is not None:
             if now_sec - self._last_action_time_sec > self._command_timeout_sec:
-                velocities = [0.0] * len(self._joint_names)
+                action = [0.0] * (len(self._joint_names) + 1)
+                action[-1] = -1
+
+        if len(action) >= len(self._joint_names) + 1:
+            velocities = action[: len(self._joint_names)]
+            gripper_value = action[len(self._joint_names)]
+            print("publishing action", velocities, "gripper", gripper_value)
+        else:
+            velocities = action[: len(self._joint_names)]
+            gripper_value = 0.0
 
         velocities = self._clamp_velocities(velocities)
+        
         self._publish_joint_command(velocities)
+        self._maybe_handle_gripper_action(gripper_value)
         self._last_action_time_sec = now_sec
+
+    def _maybe_handle_gripper_action(self, gripper_value: float) -> None:
+        if self._gripper_sequence_active:
+            return
+
+        if gripper_value > 0.0:
+            signal = 1
+        elif gripper_value < 0.0:
+            signal = -1
+        else:
+            return
+
+        if signal == self._last_gripper_signal:
+            return
+
+        self._last_gripper_signal = signal
+
+        if signal == 1:
+            self._start_grip_sequence()
+        else:
+            if self._send_gripper_command("blow"):
+                self._gripper_state = 0.0
+            else:
+                self._last_gripper_signal = None
+
+    def _start_grip_sequence(self) -> None:
+        if not self._send_gripper_command("grip"):
+            self._last_gripper_signal = None
+            return
+
+        self._gripper_sequence_active = True
+        # self._gripper_state = 1.0
+
+        if self._gripper_release_timer is not None:
+            self._gripper_release_timer.cancel()
+        self._gripper_release_timer = self.create_timer(1.0, self._release_grip)
+
+    def _release_grip(self) -> None:
+        if self._gripper_release_timer is not None:
+            self._gripper_release_timer.cancel()
+            self._gripper_release_timer = None
+
+        self._send_gripper_command("release")
+        self._gripper_state = 1.0
+        self._gripper_sequence_active = False
+
+    def _send_gripper_command(self, command: str) -> bool:
+        if not self._gripper_client.wait_for_service(timeout_sec=0.1):
+            self.get_logger().warn(
+                f"Waiting for gripper service at {self._gripper_service}"
+            )
+            self._gripper_sequence_active = False
+            return False
+
+        request = GripperControl.Request()
+        request.command = command
+        self._gripper_future = self._gripper_client.call_async(request)
+        return True
 
     def _clamp_velocities(self, velocities: Sequence[float]) -> List[float]:
         clamped: List[float] = []
@@ -565,8 +648,8 @@ class ImitationControl(Node):
         depth_images = torch.stack([torch.from_numpy(obs.depth).unsqueeze(0) for obs in observations], dim=0).unsqueeze(0)  # Shape: (obs_window, 1, H, W)
         non_visual_obs = torch.stack([torch.from_numpy(obs.joints) for obs in observations], dim=0)  # Shape: (obs_window, num_joints)
         
-        print("Depth images shape: ", depth_images.shape)
-        print("Non-visual observations shape: ", non_visual_obs.shape)
+        # print("Depth images shape: ", depth_images.shape)
+        # print("Non-visual observations shape: ", non_visual_obs.shape)
         
         num_predicted_actions=1
         action_sequence_length=20
@@ -593,12 +676,12 @@ class ImitationControl(Node):
             t_k_tensor = torch.tensor(t_k, device=device, dtype=torch.float32).unsqueeze(0)
             ## calculate the noise vector from the flow matching model
             
-            self.get_logger().info("Denoising step {}/{}: t_k={:.4f}".format(k+1, num_steps, t_k))
+            # self.get_logger().info("Denoising step {}/{}: t_k={:.4f}".format(k+1, num_steps, t_k))
             
-            print("depth_images device == ", depth_images.device)
-            print("non_visual_obs device == ", non_visual_obs.device)
-            print("x device == ", x.device)
-            print("t_k_tensor device == ", t_k_tensor.device)
+            # print("depth_images device == ", depth_images.device)
+            # print("non_visual_obs device == ", non_visual_obs.device)
+            # print("x device == ", x.device)
+            # print("t_k_tensor device == ", t_k_tensor.device)
             
             v_k = self.flow_matching_policy(depth_images, non_visual_obs, x, t_k_tensor)
             
@@ -611,19 +694,21 @@ class ImitationControl(Node):
             t_k1 = (k + 1) * dt
             t_k1_tensor = torch.tensor(t_k1, device=device, dtype=torch.float32).unsqueeze(0)
             
-            self.get_logger().info("Denoising step {}/{}: t_k1={:.4f}".format(k+1, num_steps, t_k1))
+            # self.get_logger().info("Denoising step {}/{}: t_k1={:.4f}".format(k+1, num_steps, t_k1))
             
             v_k1 = self.flow_matching_policy(depth_images, non_visual_obs, x_pred, t_k1_tensor)
             
             x = x + 0.5 * dt * (v_k + v_k1)
 
-        self.get_logger().info("Model inference completed.")
-        self.get_logger().info("Output shape: {}".format(x.shape))
+        # self.get_logger().info("Model inference completed.")
+        # self.get_logger().info("Output shape: {}".format(x.shape))
         
-        actions = x.squeeze(0).cpu().numpy()[:, :6]  # Shape: (action_sequence_length, action_dim)
+        actions = x.squeeze(0).cpu().numpy()[:, :7]  # Shape: (action_sequence_length, action_dim)
         
-        self.get_logger().info("Actions shape: {}".format(actions.shape))
-        self.get_logger().info("Sample output action sequence: {}".format(actions))
+        print("model output", actions[:, 6])
+        
+        # self.get_logger().info("Actions shape: {}".format(actions.shape))
+        # self.get_logger().info("Sample output action sequence: {}".format(actions))
         
         return actions.tolist()
 
