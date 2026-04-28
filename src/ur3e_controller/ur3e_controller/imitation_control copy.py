@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
-from std_srvs.srv import Trigger, SetBool
+from std_srvs.srv import Trigger
 from control_msgs.msg import JointJog
 from ecpmi_gripper.srv import GripperControl
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -286,12 +286,11 @@ class ImitationControl(Node):
         self.declare_parameter("sync_tolerance_sec", 0.2)
         self.declare_parameter("obs_window", 5)
         self.declare_parameter("action_horizon", 20)
-        self.declare_parameter("action_execute_count", 5)
+        self.declare_parameter("action_execute_count", 10)
         self.declare_parameter("max_joint_speed", 1.0)
         self.declare_parameter("auto_start_servo", True)
         self.declare_parameter("start_servo_service", "/servo_node/start_servo")
         self.declare_parameter("gripper_service", "/gripper_control")
-        self.declare_parameter("gripper_state_service", "/set_observation_gripper_state")
         self.declare_parameter("command_timeout_sec", 0.5)
         self.declare_parameter("joint_names", [
             "shoulder_pan_joint",
@@ -324,9 +323,6 @@ class ImitationControl(Node):
             self.get_parameter("command_timeout_sec").value
         )
         self._joint_names = list(self.get_parameter("joint_names").value)
-        self._gripper_state_service = str(
-            self.get_parameter("gripper_state_service").value
-        )
 
         self._latest_joint_state: Optional[LatestMsg] = None
         self._latest_depth: Optional[LatestMsg] = None
@@ -339,7 +335,6 @@ class ImitationControl(Node):
         self._last_drop_log_sec: Optional[float] = None
         self._last_collect_log_sec: Optional[float] = None
         self._gripper_state = 0.0
-        self._obs_gripper_state = 0.0
         self._last_gripper_signal: Optional[int] = None
         self._gripper_sequence_active = False
         self._gripper_future: Optional[rclpy.task.Future] = None
@@ -353,9 +348,6 @@ class ImitationControl(Node):
         )
         self.create_subscription(Image, self._depth_topic, self._on_depth, 10)
         self._gripper_client = self.create_client(GripperControl, self._gripper_service)
-        self._gripper_state_srv = self.create_service(
-            SetBool, self._gripper_state_service, self._set_observation_gripper_state
-        )
 
         self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
         self._start_servo_timer = None
@@ -363,7 +355,7 @@ class ImitationControl(Node):
             self._start_servo_timer = self.create_timer(1.0, self._try_start_servo)
 
         period = 1.0 / self._control_rate_hz if self._control_rate_hz > 0 else 0.0667
-        self._control_timer = self.create_timer(period, self._control_step_2)
+        self._control_timer = self.create_timer(period, self._control_step)
 
         self.get_logger().info(
             f"ImitationControl ready. Publishing joint commands on {self._command_topic} at {self._control_rate_hz:.2f} Hz"
@@ -472,7 +464,7 @@ class ImitationControl(Node):
             return
 
         joints = self._extract_joint_vector(self._latest_joint_state.msg)
-        joints = np.append(joints, float(self._obs_gripper_state))
+        joints = np.append(joints, float(self._gripper_state))
         # joints = np.append(joints, 0.0)
         
         # print("observation", joints)
@@ -489,51 +481,50 @@ class ImitationControl(Node):
         
         return joints
     
-    def _control_step_2(self) -> None:
-        now_sec = self._now_sec()
-        obs_joints = self._maybe_append_observation(now_sec)
-        self._maybe_collect_inference()
-        self._maybe_start_inference()
-        # act_joints = self._publish_next_action(now_sec)
+    # def _control_step_2(self) -> None:
+    #     now_sec = self._now_sec()
+    #     obs_joints = self._maybe_append_observation(now_sec)
+    #     self._maybe_collect_inference()
+    #     self._maybe_start_inference()
+    #     # act_joints = self._publish_next_action(now_sec)
     
-        if obs_joints is None:
-            self._publish_next_action(now_sec)
-            return
+    #     if obs_joints is None:
+    #         self._publish_next_action(now_sec)
+    #         return
         
-        if self.previous_obs is not None:
-            previous_obs = self.previous_obs[:6]
-            previous_act = np.array(self.previous_act[:6])
-            expected_next_obs = previous_obs + previous_act[:6] / self._control_rate_hz
-            next_obs = obs_joints[:6]
+    #     if self.previous_obs is not None:
+    #         previous_obs = self.previous_obs[:6]
+    #         previous_act = np.array(self.previous_act[:6])
+    #         expected_next_obs = previous_obs + previous_act[:6] / self._control_rate_hz
+    #         next_obs = obs_joints[:6]
             
-            error = expected_next_obs - next_obs
+    #         error = expected_next_obs - next_obs
             
-            def rad_to_deg(arr):
-                return np.round(arr * (180 / math.pi) * 100) / 100
+    #         def rad_to_deg(arr):
+    #             return np.round(arr * (180 / math.pi) * 100) / 100
             
-            print("Previous Obs", rad_to_deg(previous_obs))
-            print("Previous Act", rad_to_deg(previous_act))
-            print("Excepted Next obs", rad_to_deg(expected_next_obs))
-            print("Actual Next obs", rad_to_deg(next_obs))
-            print("Error", rad_to_deg(error))
-            print("Error (radians)", error)
-            print((next_obs - previous_obs) / (expected_next_obs - previous_obs))
-            print("-" * 50)
+    #         print("Previous Obs", rad_to_deg(previous_obs))
+    #         print("Previous Act", rad_to_deg(previous_act))
+    #         print("Excepted Next obs", rad_to_deg(expected_next_obs))
+    #         print("Actual Next obs", rad_to_deg(next_obs))
+    #         print("Error", rad_to_deg(error))
+    #         print("Error (radians)", error)
+    #         print("-" * 50)
             
-            if (np.abs(error) > 0.03).any():
-                correction_actions = self.previous_act
-                correction_actions[:6] = error * self._control_rate_hz
+    #         if (np.abs(error) > 0.02).any():
+    #             correction_actions = self.previous_act
+    #             correction_actions[:6] = error * self._control_rate_hz
                 
-                self._action_queue.appendleft(correction_actions)
-                self._obs_queue.popleft()
-                self._publish_next_action(now_sec)
+    #             self._action_queue.appendleft(correction_actions)
+    #             self._obs_queue.popleft()
+    #             self._publish_next_action(now_sec)
                 
-                return
+    #             return
         
-        act_joints = self._publish_next_action(now_sec)
+    #     act_joints = self._publish_next_action(now_sec)
         
-        self.previous_obs = obs_joints
-        self.previous_act = act_joints
+    #     self.previous_obs = obs_joints
+    #     self.previous_act = act_joints
 
     def _rate_limited_drop_log(self, now_sec: float, message: str) -> None:
         if self._last_drop_log_sec is None or now_sec - self._last_drop_log_sec >= 1.0:
@@ -632,11 +623,11 @@ class ImitationControl(Node):
         if len(action) >= len(self._joint_names) + 1:
             velocities = action[: len(self._joint_names)]
             gripper_value = action[len(self._joint_names)]
-            # print("publishing action", velocities, "gripper", gripper_value)
+            print("publishing action", velocities, "gripper", gripper_value)
         else:
             velocities = action[: len(self._joint_names)]
             gripper_value = 0.0
-            # print("publishing action", velocities, "gripper", gripper_value)
+            print("publishing action", velocities, "gripper", gripper_value)
 
         velocities = self._clamp_velocities(velocities)
         
@@ -710,20 +701,6 @@ class ImitationControl(Node):
         self._gripper_future = self._gripper_client.call_async(request)
         return True
 
-    def _set_observation_gripper_state(
-        self, request: SetBool.Request, response: SetBool.Response
-    ) -> SetBool.Response:
-        self._obs_gripper_state = 1.0 if request.data else 0.0
-        
-        if self._obs_gripper_state == 0.0:
-            self._maybe_handle_gripper_action(-1.0)
-        
-        response.success = True
-        response.message = (
-            f"Observation gripper state set to {self._obs_gripper_state:.1f}."
-        )
-        return response
-
     def _clamp_velocities(self, velocities: Sequence[float]) -> List[float]:
         clamped: List[float] = []
         for v in velocities:
@@ -776,7 +753,7 @@ class ImitationControl(Node):
         depth_images = depth_images.to(device=device, dtype=torch.float32)
         non_visual_obs = non_visual_obs.to(device=device, dtype=torch.float32)
         
-        # print("model input (2 decimal places)", torch.round(non_visual_obs * 100) / 100)
+        print("model input (2 decimal places)", torch.round(non_visual_obs * 100) / 100)
         # print("model input (degrees)", torch.round(non_visual_obs[:, :6] * 100) / 100 * (180 / math.pi))
         
         ## depth image shape should be (5,1,150,350)
@@ -817,39 +794,6 @@ class ImitationControl(Node):
         # Placeholder: replace with your model inference. Expected output shape: [20, 7].
 
     def _publish_joint_command(self, velocities: Sequence[float]) -> None:
-        # if self._latest_joint_state is not None and np.any(velocities):
-        
-        #     def to_rad(waypoint_deg):
-        #         return [math.radians(angle_deg) for angle_deg in waypoint_deg]
-
-        #     target = to_rad([-69.55, -120.08, -68.45, -81.19, 84.13, 3.18])
-        #     joints = self._extract_joint_vector(self._latest_joint_state.msg)
-            
-        #     errors: List[float] = []
-        #     max_err = 0.0
-        #     for current, goal in zip(joints, target):
-        #         e = math.atan2(math.sin(goal - current), math.cos(goal - current))
-        #         errors.append(e)
-        #         max_err = max(max_err, abs(e))
-
-        #     # Normalize velocities so all joints finish at the same time
-        #     target_velocities: List[float] = []
-        #     for e in errors:
-        #         normalized_speed = (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
-        #         v = math.copysign(normalized_speed, e)
-
-        #         # Clamp each joint speed
-        #         if abs(v) > self._max_joint_speed > 0.0:
-        #             v = math.copysign(self._max_joint_speed, v)
-        #         target_velocities.append(v)
-                
-        #     print("target velocities", target_velocities)
-        #     print("actual velocities", velocities)
-        #     print("errors", target_velocities - np.array(velocities))
-        
-        # ###############
-        
-        
         msg = JointJog()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.joint_names = self._joint_names

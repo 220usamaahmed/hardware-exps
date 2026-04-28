@@ -13,7 +13,6 @@ from std_msgs.msg import UInt8
 from control_msgs.msg import JointJog
 from ecpmi_gripper.srv import GripperControl
 import random
-import numpy as np
 
 
 JointWaypoint = List[float]
@@ -47,10 +46,10 @@ class TrajectoryControl(Node):
         # Joint-space controller gains and limits (for joint velocities)
         self.declare_parameter("k_p_joint", 4.0)
         # self.declare_parameter("max_joint_speed", 1.5)  # rad/s
-        self.declare_parameter("max_joint_speed", 1.0)  # rad/s
+        self.declare_parameter("max_joint_speed", 0.7)  # rad/s
         self.declare_parameter("joint_tolerance", 0.01)  # rad
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
-        self.declare_parameter("velocity_noise_std", 0.1) # rad/s
+        self.declare_parameter("velocity_noise_std", 0.0) # rad/s
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -105,11 +104,12 @@ class TrajectoryControl(Node):
             JointJog, self._command_topic_raw, 10
         )
         self._gripper_state_pub = self.create_publisher(
-            UInt8, self._gripper_state_topic,10
+            UInt8, self._gripper_state_topic, 10
         )
         self._joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
+        ## get the joint position
         self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
         self._gripper_client = self.create_client(GripperControl, self._gripper_service)
         self._recorder_start_client = None
@@ -190,12 +190,11 @@ class TrajectoryControl(Node):
         random.seed(time.time())
 
         # Waypoints are specified in degrees and converted to radians.
-        home = [-90.00, 0.00, -90.00, 0.00, 90.00, -0.00]
-       # home=[-3.28, -90.76 , 3.69 , -96.56, 2.77 , 92.44]
+        home = [-90.00, 0.00, -90.00, 0.00, 90.00, -20.00]
         home_l = [-90.00, 0.00, -90.00, 0.00, 90.00, 0.00]
         # home = [-90.00, 0.00, -90.00, 0.00, 90.00, 90.00]
-        home_with_noise = [angle + random.uniform(-5, 5) for angle in home]
-        home_with_noise_2 = [angle + random.uniform(-5, 5) for angle in home]
+        home_with_noise = [angle + random.uniform(-10, 10) for angle in home]
+        home_with_noise_2 = [angle + random.uniform(-10, 10) for angle in home]
         
         grip_0 = {
             "gripping_prepare": [-113.23, -101.83, -144.09, -20.17, 90.70, -20.18],
@@ -253,17 +252,14 @@ class TrajectoryControl(Node):
         gripping_pull_3 = gripper_choice["gripping_pull_3"]
         
         reset_pose = grip_0["gripping_pull_3"]
-        #reset_pose[5] = 4.0
-        reset_pose[5] = 0.0
+        reset_pose[5] = 4.0
+        
         ## Pick and place left drawer
         
-        # pick_prepare = [-108.99, -67.52, -81.50, 87.93, -0.11, -71.75] # Middle
-        # pick_prepare = [-107.11, -75.61, -86.48, 89.74, 9.77, -63.34] # Left
-        pick_prepare = [-106.42, -74.75, -87.63, 89.64, -5.45, -78.59] # Right
+        pick_prepare = [-108.99, -67.52, -81.50, 87.93, -0.11, -71.75]
+        # pick_prepare = [angle + random.uniform(-2, 2) for angle in pick_prepare]
         
-        # pick = [-120.08, -68.45, -81.19, 84.13, 3.18, -69.55]  # Middle
-        # pick = [-108.64, -85.47, -75.10, 89.75, 9.77, -63.36] # Left
-        pick = [-108.02, -86.21, -74.57, 89.66, -5.45, -78.61] # Right
+        pick = [-120.08, -68.45, -81.19, 84.13, 3.18, -69.55]
         
         lift = [-107.66, -23.45, -139.67, 90.22, 0.21, -64.52]
         lift = [angle + random.uniform(-2, 2) for angle in lift]
@@ -284,95 +280,94 @@ class TrajectoryControl(Node):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
 
         # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
+        #     Step(kind="waypoint", waypoint=to_rad(pick)),
         # ]
         
         return [
             Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
             
+            # Step(kind="recorder_start"),
+            # Step(kind="wait", wait_sec=1.0),
+
+            # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
+            # Step(kind="waypoint", waypoint=to_rad(pick)),
+            
+            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
+            
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick2/pick")
+        ]
+
+        return [
+            
+            ### Drawer open
+            
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            
             Step(kind="recorder_start"),
+            
             Step(kind="wait", wait_sec=1.0),
-
-            Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
-
-            Step(kind="waypoint", waypoint=to_rad(pick)),
-
+            
+            Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
+            Step(kind="waypoint", waypoint=to_rad(gripping)),
+            
             Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
             Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-            Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
+            # Step(kind="waypoint", waypoint=to_rad(gripping_pull_1)),
+            Step(kind="waypoint", waypoint=to_rad(gripping_pull_2)),
+            Step(kind="waypoint", waypoint=to_rad(gripping_pull_3)),
             
-            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/pick5/pick")
-        ]
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            
+            Step(kind="waypoint", waypoint=to_rad(home_l)),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="wait", wait_sec=0.5),
 
-        # return [
+            Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/open_drawer_left/open_drawer_left"),
             
-        #     ### Drawer open
+            Step(kind="wait", wait_sec=5.0),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="waypoint", waypoint=to_rad(reset_pose)),
+            # Step(kind="waypoint", waypoint=to_rad(grip_0["gripping"])),
             
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            ### Drawer pick and place
             
-        #     Step(kind="recorder_start"),
+            # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
             
-        #     Step(kind="wait", wait_sec=1.0),
+            # Step(kind="recorder_start"),
             
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
+            # # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
             
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            # Step(kind="waypoint", waypoint=to_rad(pick)),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(gripping_pull_1)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_2)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_3)),
+            # Step(kind="gripper", gripper_command="grip", wait_sec=0.5),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            # Step(kind="waypoint", waypoint=to_rad(lift)),
             
-        #     Step(kind="waypoint", waypoint=to_rad(home_l)),
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick/pick"),
             
-        #     Step(kind="wait", wait_sec=0.5),
-
-        #     Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/open_drawer_left/open_drawer_left"),
+            # Step(kind="wait", wait_sec=2.0),
             
-        #     Step(kind="wait", wait_sec=5.0),
+            # Step(kind="recorder_start"),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(reset_pose)),
-        #     # Step(kind="waypoint", waypoint=to_rad(grip_0["gripping"])),
+            # # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
+            # # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
+            # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
+            # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
             
-        #     ### Drawer pick and place
+            # Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
             
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(pick)),
-            
-        #     # Step(kind="gripper", gripper_command="grip", wait_sec=0.5),
-        #     # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(lift)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick/pick"),
-            
-        #     # Step(kind="wait", wait_sec=2.0),
-            
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
-        #     # # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
-            
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/place_right/place_right"),
-        # ] * 1
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/place_right/place_right"),
+        ] * 1
 
     def _try_start_servo(self) -> None:
         if not self._auto_start_servo:
@@ -399,6 +394,8 @@ class TrajectoryControl(Node):
             self.get_logger().warn(f"MoveIt Servo start failed: {response.message}")
 
     def _joint_state_callback(self, msg: JointState) -> None:
+        # Get current joint state here
+        
         # Lazy initialization of name->index mapping using first message
         if self._name_to_index is None:
             self._name_to_index = {name: i for i, name in enumerate(msg.name)}
@@ -543,14 +540,11 @@ class TrajectoryControl(Node):
         # Joint error and norm (wrapped to shortest angular distance)
         errors: List[float] = []
         max_err = 0.0
-        print("Current joints:", [math.degrees(j) for j in self._current_joints])
-        print("Target waypoint:", [math.degrees(t) for t in target])
         for current, goal in zip(self._current_joints, target):
             e = math.atan2(math.sin(goal - current), math.cos(goal - current))
             errors.append(e)
             max_err = max(max_err, abs(e))
 
-        # Check if the target is reached
         if max_err < self._joint_tolerance:
             self.get_logger().info(
                 f"Reached joint waypoint {self._current_step_index + 1}/{len(self._steps)}"
@@ -563,16 +557,20 @@ class TrajectoryControl(Node):
             self._current_step_index += 1
             return
 
-        # Normalize velocities so all joints finish at the same time
+        # Proportional joint velocity command
         velocities: List[float] = []
         for e in errors:
-            normalized_speed = (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
-            v = math.copysign(normalized_speed, e)
-
+            v = self._k_p_joint * e
             # Clamp each joint speed
             if abs(v) > self._max_joint_speed > 0.0:
                 v = math.copysign(self._max_joint_speed, v)
+            if 0.0 < self._min_joint_speed <= self._max_joint_speed and abs(v) > 0.0:
+                if abs(v) < self._min_joint_speed:
+                    v = math.copysign(self._min_joint_speed, v)
             velocities.append(v)
+            
+        # self.get_logger().info(f"Errors: {errors}")
+        # self.get_logger().info(f"Velocities: {velocities}")
 
         if any(abs(v) > 0.0 for v in velocities):
             if self._last_vel_log_sec is None or now_sec - self._last_vel_log_sec >= 1.0:
@@ -581,7 +579,6 @@ class TrajectoryControl(Node):
                 self.get_logger().info(f"Joint errors: {errors}")
                 self.get_logger().info("--")
         self._publish_joint_command(velocities)
-        
 
     def _handle_gripper_step(self, step: Step) -> None:
         self._publish_joint_command([0.0] * len(self._joint_names))
@@ -677,10 +674,10 @@ class TrajectoryControl(Node):
     def _publish_joint_command(self, velocities: List[float]) -> None:
         raw_msg = self._build_joint_jog(velocities)
         self._joint_cmd_raw_pub.publish(raw_msg)
-        
         noisy_velocities = self._apply_velocity_noise(velocities)
         noisy_msg = self._build_joint_jog(noisy_velocities)
         self._joint_cmd_pub.publish(noisy_msg)
+        ## publish the actions
 
     def _build_joint_jog(self, velocities: List[float]) -> JointJog:
         msg = JointJog()
@@ -691,7 +688,7 @@ class TrajectoryControl(Node):
         msg.duration = 0.0
         return msg
 
-    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:        
+    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:
         if self._velocity_noise_std <= 0.0:
             return velocities
         noisy: List[float] = []

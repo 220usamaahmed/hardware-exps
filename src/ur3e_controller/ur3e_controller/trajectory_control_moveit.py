@@ -1,8 +1,10 @@
 import math
+from platform import node
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from pymoveit2.robots.crane_x7 import joint_names
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -13,11 +15,240 @@ from std_msgs.msg import UInt8
 from control_msgs.msg import JointJog
 from ecpmi_gripper.srv import GripperControl
 import random
-import numpy as np
 
+
+from rclpy.executors import MultiThreadedExecutor
+from threading import Thread
+
+# Import the pymoveit2 wrapper
+from pymoveit2 import MoveIt2, moveit2
+from sensor_msgs.msg import JointState
 
 JointWaypoint = List[float]
+#!/usr/bin/env python3
+#!/usr/bin/env python3
 
+import time
+import math
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from threading import Thread
+
+# MoveIt & Geometry Imports
+from pymoveit2 import MoveIt2
+from geometry_msgs.msg import PoseStamped
+import tf2_ros
+
+# Vision Imports
+from sensor_msgs.msg import Image
+from rclpy.qos import qos_profile_sensor_data
+from cv_bridge import CvBridge
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = Node("two_phase_planner_node")
+    
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
+    executor_thread = Thread(target=executor.spin, daemon=True)
+    executor_thread.start()
+
+    # ==========================================
+    # TF2 SETUP (To find the arm's 3D position)
+    # ==========================================
+    tf_buffer = tf2_ros.Buffer()
+    tf_listener = tf2_ros.TransformListener(tf_buffer, node)
+
+    # ==========================================
+    # VISION SETUP
+    # ==========================================
+    bridge = CvBridge()
+    vision_data = {"center_distance": None}
+
+    def depth_callback(msg):
+        try:
+            cv_image = bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+            height, width = cv_image.shape
+            dist = cv_image[int(height / 2), int(width / 2)]
+            if not (math.isnan(dist) or math.isinf(dist)):
+                vision_data["center_distance"] = round(dist, 3)
+        except Exception as e:
+            node.get_logger().error(f"Vision error: {e}")
+
+    node.create_subscription(Image, '/zed/zed_node/depth/depth_registered', depth_callback, qos_profile_sensor_data)
+
+    # ==========================================
+    # MOVEIT SETUP
+    # ==========================================
+    joint_names = [
+        'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
+        'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
+    ]
+
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=joint_names,
+        base_link_name="base_link",
+        end_effector_name="tool0",
+        group_name="ur_manipulator"
+    )
+
+    node.get_logger().info("Initializing Robot Framework...")
+    time.sleep(2.0)
+
+    # ==========================================================
+    # PHASE 1: JOINT SPACE MOVE (MoveJ with Waypoints)
+    # ==========================================================
+    node.get_logger().info("--- STARTING PHASE 1: JOINT WAYPOINTS ---")
+    start_joints = [-1.5184, -1.7104, 0.1222, -1.6755, 1.6406, 1.3265]
+    goal_joints  = [-1.2915, -2.1118, -1.1345, -1.4486, 1.6406, 1.3265]# [-1.2915, -2.1293, -0.9250, -1.6755, 1.6406, 1.3265]
+    
+    max_step_j = 0.05 
+    max_diff_j = max(abs(g - s) for s, g in zip(start_joints, goal_joints))
+    num_steps_j = int(math.ceil(max_diff_j / max_step_j)) if max_diff_j > 0 else 1
+
+    joint_waypoints = []
+    for i in range(1, num_steps_j + 1):
+        fraction = i / num_steps_j
+        joint_waypoints.append([s + (g - s) * fraction for s, g in zip(start_joints, goal_joints)])
+
+    node.get_logger().info("Moving to Initial Configuration...")
+    moveit2.move_to_configuration(start_joints, joint_names)
+    moveit2.wait_until_executed()
+    
+    print("Press Enter to execute Phase 1 (MoveJ)...")
+    input()
+
+    for step_index, waypoint in enumerate(joint_waypoints):
+        node.get_logger().info(f"Phase 1 - Step {step_index + 1}/{num_steps_j}")
+        moveit2.move_to_configuration(waypoint, joint_names, tolerance=0.005)
+        moveit2.wait_until_executed()
+
+    # ==========================================================
+    # PHASE 2: CARTESIAN SPACE MOVE (MoveL with Waypoints)
+    # ==========================================================
+    print("\nPress Enter to execute Phase 2 (MoveL)...")
+    input()
+    
+    
+    '''
+    node.get_logger().info("--- STARTING PHASE 2: CARTESIAN WAYPOINTS ---")
+
+    # 1. Look up exactly where Phase 1 left the tool tip
+    try:
+        trans = tf_buffer.lookup_transform('base_link', 'tool0', rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=2.0))
+        
+        start_pose = PoseStamped()
+        start_pose.header.frame_id = "base_link"
+        start_pose.pose.position.x = trans.transform.translation.x
+        start_pose.pose.position.y = trans.transform.translation.y
+        start_pose.pose.position.z = trans.transform.translation.z
+        start_pose.pose.orientation = trans.transform.rotation # Lock the rotation!
+        
+    except Exception as e:
+        node.get_logger().error(f"Could not read current pose! {e}")
+        rclpy.shutdown()
+        return
+
+    # 2. Define the Relative Cartesian Goal
+    # For example: Move exactly 15cm (0.15m) perfectly straight along the X axis
+    dx = 0.15 
+    dy = 0.00
+    dz = 0.00
+    
+    max_step_cartesian = 0.02 # Stop every 2cm
+    total_distance = math.sqrt(dx**2 + dy**2 + dz**2)
+    num_steps_c = int(math.ceil(total_distance / max_step_cartesian)) if total_distance > 0 else 1
+    
+    # 3. Generate the Cartesian Waypoints (Linear Interpolation of X,Y,Z)
+    cartesian_waypoints = []
+    for i in range(1, num_steps_c + 1):
+        fraction = i / num_steps_c
+        waypoint = PoseStamped()
+        waypoint.header.frame_id = "base_link"
+        waypoint.pose.orientation = start_pose.pose.orientation # Keep tool straight
+        
+        waypoint.pose.position.x = start_pose.pose.position.x + (dx * fraction)
+        waypoint.pose.position.y = start_pose.pose.position.y + (dy * fraction)
+        waypoint.pose.position.z = start_pose.pose.position.z + (dz * fraction)
+        
+        cartesian_waypoints.append(waypoint)
+
+    # 4. Execute the straight line path
+    for step_index, pose_waypoint in enumerate(cartesian_waypoints):
+        node.get_logger().info(f"Phase 2 - Step {step_index + 1}/{num_steps_c}")
+        
+        # Send a pose command instead of joint commands
+        moveit2.move_to_pose(pose_waypoint)
+        moveit2.wait_until_executed()
+        
+        # Read the Camera Depth at this exact Cartesian stop
+        current_distance = vision_data["center_distance"]
+        if current_distance is not None:
+            print(f"Cartesian Step Depth : {current_distance} meters\n")
+        else:
+            print("Cartesian Step Depth : Out of range (NaN).\n")
+    node.get_logger().info("Cartesian scanning completed successfully.")
+    '''
+
+
+    rclpy.shutdown()
+    executor_thread.join()
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
 
 @dataclass
 class Step:
@@ -30,7 +261,7 @@ class Step:
 
 class TrajectoryControl(Node):
     def __init__(self) -> None:
-        super().__init__("trajectory_control")
+        super().__init__("trajectory_control_moveit")
 
         # Parameters
         # MoveIt Servo joint command topic (delta_joint_cmds)
@@ -47,10 +278,10 @@ class TrajectoryControl(Node):
         # Joint-space controller gains and limits (for joint velocities)
         self.declare_parameter("k_p_joint", 4.0)
         # self.declare_parameter("max_joint_speed", 1.5)  # rad/s
-        self.declare_parameter("max_joint_speed", 1.0)  # rad/s
+        self.declare_parameter("max_joint_speed", 0.7)  # rad/s
         self.declare_parameter("joint_tolerance", 0.01)  # rad
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
-        self.declare_parameter("velocity_noise_std", 0.1) # rad/s
+        self.declare_parameter("velocity_noise_std", 0.0) # rad/s
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -105,11 +336,12 @@ class TrajectoryControl(Node):
             JointJog, self._command_topic_raw, 10
         )
         self._gripper_state_pub = self.create_publisher(
-            UInt8, self._gripper_state_topic,10
+            UInt8, self._gripper_state_topic, 10
         )
         self._joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
+        ## get the joint position
         self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
         self._gripper_client = self.create_client(GripperControl, self._gripper_service)
         self._recorder_start_client = None
@@ -190,12 +422,11 @@ class TrajectoryControl(Node):
         random.seed(time.time())
 
         # Waypoints are specified in degrees and converted to radians.
-        home = [-90.00, 0.00, -90.00, 0.00, 90.00, -0.00]
-       # home=[-3.28, -90.76 , 3.69 , -96.56, 2.77 , 92.44]
+        home = [-90.00, 0.00, -90.00, 0.00, 90.00, -20.00]
         home_l = [-90.00, 0.00, -90.00, 0.00, 90.00, 0.00]
         # home = [-90.00, 0.00, -90.00, 0.00, 90.00, 90.00]
-        home_with_noise = [angle + random.uniform(-5, 5) for angle in home]
-        home_with_noise_2 = [angle + random.uniform(-5, 5) for angle in home]
+        home_with_noise = [angle + random.uniform(-10, 10) for angle in home]
+        home_with_noise_2 = [angle + random.uniform(-10, 10) for angle in home]
         
         grip_0 = {
             "gripping_prepare": [-113.23, -101.83, -144.09, -20.17, 90.70, -20.18],
@@ -253,17 +484,14 @@ class TrajectoryControl(Node):
         gripping_pull_3 = gripper_choice["gripping_pull_3"]
         
         reset_pose = grip_0["gripping_pull_3"]
-        #reset_pose[5] = 4.0
-        reset_pose[5] = 0.0
+        reset_pose[5] = 4.0
+        
         ## Pick and place left drawer
         
-        # pick_prepare = [-108.99, -67.52, -81.50, 87.93, -0.11, -71.75] # Middle
-        # pick_prepare = [-107.11, -75.61, -86.48, 89.74, 9.77, -63.34] # Left
-        pick_prepare = [-106.42, -74.75, -87.63, 89.64, -5.45, -78.59] # Right
+        pick_prepare = [-108.99, -67.52, -81.50, 87.93, -0.11, -71.75]
+        # pick_prepare = [angle + random.uniform(-2, 2) for angle in pick_prepare]
         
-        # pick = [-120.08, -68.45, -81.19, 84.13, 3.18, -69.55]  # Middle
-        # pick = [-108.64, -85.47, -75.10, 89.75, 9.77, -63.36] # Left
-        pick = [-108.02, -86.21, -74.57, 89.66, -5.45, -78.61] # Right
+        pick = [-120.08, -68.45, -81.19, 84.13, 3.18, -69.55]
         
         lift = [-107.66, -23.45, -139.67, 90.22, 0.21, -64.52]
         lift = [angle + random.uniform(-2, 2) for angle in lift]
@@ -284,95 +512,94 @@ class TrajectoryControl(Node):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
 
         # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
+        #     Step(kind="waypoint", waypoint=to_rad(pick)),
         # ]
         
         return [
             Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
             
+            # Step(kind="recorder_start"),
+            # Step(kind="wait", wait_sec=1.0),
+
+            # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
+            # Step(kind="waypoint", waypoint=to_rad(pick)),
+            
+            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
+            
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick2/pick")
+        ]
+
+        return [
+            
+            ### Drawer open
+            
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            
             Step(kind="recorder_start"),
+            
             Step(kind="wait", wait_sec=1.0),
-
-            Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
-
-            Step(kind="waypoint", waypoint=to_rad(pick)),
-
+            
+            Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
+            Step(kind="waypoint", waypoint=to_rad(gripping)),
+            
             Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
             Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-            Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
+            # Step(kind="waypoint", waypoint=to_rad(gripping_pull_1)),
+            Step(kind="waypoint", waypoint=to_rad(gripping_pull_2)),
+            Step(kind="waypoint", waypoint=to_rad(gripping_pull_3)),
             
-            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/pick5/pick")
-        ]
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            
+            Step(kind="waypoint", waypoint=to_rad(home_l)),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="wait", wait_sec=0.5),
 
-        # return [
+            Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/open_drawer_left/open_drawer_left"),
             
-        #     ### Drawer open
+            Step(kind="wait", wait_sec=5.0),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="waypoint", waypoint=to_rad(reset_pose)),
+            # Step(kind="waypoint", waypoint=to_rad(grip_0["gripping"])),
             
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            ### Drawer pick and place
             
-        #     Step(kind="recorder_start"),
+            # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
             
-        #     Step(kind="wait", wait_sec=1.0),
+            # Step(kind="recorder_start"),
             
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
+            # # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
             
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            # Step(kind="waypoint", waypoint=to_rad(pick)),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(gripping_pull_1)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_2)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_3)),
+            # Step(kind="gripper", gripper_command="grip", wait_sec=0.5),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            # Step(kind="waypoint", waypoint=to_rad(lift)),
             
-        #     Step(kind="waypoint", waypoint=to_rad(home_l)),
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick/pick"),
             
-        #     Step(kind="wait", wait_sec=0.5),
-
-        #     Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/open_drawer_left/open_drawer_left"),
+            # Step(kind="wait", wait_sec=2.0),
             
-        #     Step(kind="wait", wait_sec=5.0),
+            # Step(kind="recorder_start"),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(reset_pose)),
-        #     # Step(kind="waypoint", waypoint=to_rad(grip_0["gripping"])),
+            # # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
+            # # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
+            # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
+            # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
             
-        #     ### Drawer pick and place
+            # Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
             
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(pick)),
-            
-        #     # Step(kind="gripper", gripper_command="grip", wait_sec=0.5),
-        #     # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(lift)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick/pick"),
-            
-        #     # Step(kind="wait", wait_sec=2.0),
-            
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
-        #     # # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
-            
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/place_right/place_right"),
-        # ] * 1
+            # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/place_right/place_right"),
+        ] * 1
 
     def _try_start_servo(self) -> None:
         if not self._auto_start_servo:
@@ -399,6 +626,8 @@ class TrajectoryControl(Node):
             self.get_logger().warn(f"MoveIt Servo start failed: {response.message}")
 
     def _joint_state_callback(self, msg: JointState) -> None:
+        # Get current joint state here
+        
         # Lazy initialization of name->index mapping using first message
         if self._name_to_index is None:
             self._name_to_index = {name: i for i, name in enumerate(msg.name)}
@@ -543,14 +772,11 @@ class TrajectoryControl(Node):
         # Joint error and norm (wrapped to shortest angular distance)
         errors: List[float] = []
         max_err = 0.0
-        print("Current joints:", [math.degrees(j) for j in self._current_joints])
-        print("Target waypoint:", [math.degrees(t) for t in target])
         for current, goal in zip(self._current_joints, target):
             e = math.atan2(math.sin(goal - current), math.cos(goal - current))
             errors.append(e)
             max_err = max(max_err, abs(e))
 
-        # Check if the target is reached
         if max_err < self._joint_tolerance:
             self.get_logger().info(
                 f"Reached joint waypoint {self._current_step_index + 1}/{len(self._steps)}"
@@ -563,16 +789,20 @@ class TrajectoryControl(Node):
             self._current_step_index += 1
             return
 
-        # Normalize velocities so all joints finish at the same time
+        # Proportional joint velocity command
         velocities: List[float] = []
         for e in errors:
-            normalized_speed = (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
-            v = math.copysign(normalized_speed, e)
-
+            v = self._k_p_joint * e
             # Clamp each joint speed
             if abs(v) > self._max_joint_speed > 0.0:
                 v = math.copysign(self._max_joint_speed, v)
+            if 0.0 < self._min_joint_speed <= self._max_joint_speed and abs(v) > 0.0:
+                if abs(v) < self._min_joint_speed:
+                    v = math.copysign(self._min_joint_speed, v)
             velocities.append(v)
+            
+        # self.get_logger().info(f"Errors: {errors}")
+        # self.get_logger().info(f"Velocities: {velocities}")
 
         if any(abs(v) > 0.0 for v in velocities):
             if self._last_vel_log_sec is None or now_sec - self._last_vel_log_sec >= 1.0:
@@ -581,7 +811,6 @@ class TrajectoryControl(Node):
                 self.get_logger().info(f"Joint errors: {errors}")
                 self.get_logger().info("--")
         self._publish_joint_command(velocities)
-        
 
     def _handle_gripper_step(self, step: Step) -> None:
         self._publish_joint_command([0.0] * len(self._joint_names))
@@ -677,10 +906,10 @@ class TrajectoryControl(Node):
     def _publish_joint_command(self, velocities: List[float]) -> None:
         raw_msg = self._build_joint_jog(velocities)
         self._joint_cmd_raw_pub.publish(raw_msg)
-        
         noisy_velocities = self._apply_velocity_noise(velocities)
         noisy_msg = self._build_joint_jog(noisy_velocities)
         self._joint_cmd_pub.publish(noisy_msg)
+        ## publish the actions
 
     def _build_joint_jog(self, velocities: List[float]) -> JointJog:
         msg = JointJog()
@@ -691,7 +920,7 @@ class TrajectoryControl(Node):
         msg.duration = 0.0
         return msg
 
-    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:        
+    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:
         if self._velocity_noise_std <= 0.0:
             return velocities
         noisy: List[float] = []
@@ -704,12 +933,108 @@ class TrajectoryControl(Node):
 
 
 def main(args=None) -> None:
+    
     rclpy.init(args=args)
-    node = TrajectoryControl()
-    rclpy.spin(node)
-    node.destroy_node()
+
+    node = Node("step_planner_node")
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    executor_thread = Thread(target=executor.spin, daemon=True)
+    executor_thread.start()
+
+    joint_names = [
+        'shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
+        'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'
+    ]
+
+    moveit2 = MoveIt2(
+        node=node,
+        joint_names=joint_names,
+        base_link_name="base_link",
+        end_effector_name="tool0",
+        group_name="ur_manipulator"
+    )
+
+    node.get_logger().info("Initializing MoveIt 2 modified 5 ...")
+    time.sleep(2.0)
+
+    # 1. Define Initial and Final Configurations (in radians)
+    # E.g., moving from an "up" position to a "ready" position
+
+    start_joints = [-1.5184, -1.7104, 0.1222, -1.6755, 1.6406, 1.3265]
+    goal_joints  = [-1.2915, -2.1293, -0.9250, -1.6755, 1.6406, 1.3265]
+
+    # 2. Define the maximum allowed displacement per step (in radians)
+    max_step = 0.02 
+
+    # 3. Calculate the number of steps required
+    # We find the joint that has to travel the furthest to ensure NO joint exceeds max_step
+    max_diff = max(abs(g - s) for s, g in zip(start_joints, goal_joints))
+    
+    if max_diff == 0:
+        node.get_logger().info("Start and Goal are the same. Nothing to do.")
+        rclpy.shutdown()
+        executor_thread.join()
+        return
+
+    # Use math.ceil to round up to the nearest whole step
+    num_steps = int(math.ceil(max_diff / max_step))
+    node.get_logger().info(f"Max joint difference is {round(max_diff, 3)} rad. Dividing into {num_steps} steps.")
+
+    # 4. Generate the Waypoints (Linear Interpolation)
+    waypoints = []
+    for i in range(1, num_steps + 1):
+        fraction = i / num_steps
+        # Interpolate each joint based on the current fraction of completion
+        waypoint = [s + (g - s) * fraction for s, g in zip(start_joints, goal_joints)]
+        waypoints.append(waypoint)
+
+
+  
+
+
+    # 5. Execute the Path
+    node.get_logger().info("Moving to Initial Configuration...")
+    moveit2.move_to_configuration(start_joints, joint_names)
+    moveit2.wait_until_executed()
+    input()
+
+    node.get_logger().info("Starting stepped path execution...")
+    for step_index, waypoint in enumerate(waypoints):
+        node.get_logger().info(f"Executing Step {step_index + 1}/{num_steps}...")
+        
+        moveit2.move_to_configuration(waypoint, joint_names, tolerance=0.005)
+        moveit2.wait_until_executed()
+        
+        node.get_logger().info("Reading current joints ...")
+
+        current_state_msg = moveit2.joint_state
+        
+        if current_state_msg is not None:
+            # 2. Securely map and extract the 6 joints
+            position_map = dict(zip(current_state_msg.name, current_state_msg.position))
+            current_joints = [position_map[name] for name in joint_names]
+            
+            # 3. Calculate error
+            error_in_step = [abs(c - w) for c, w in zip(current_joints, waypoint)]
+            print(f"Current Joints: {[round(j, 4) for j in current_joints]}")
+            print(f"Error in step : {[round(e, 4) for e in error_in_step]}\n")
+        else:
+            node.get_logger().warn("MoveIt2 hasn't cached a joint state yet.")
+
+
+    node.get_logger().info("Target configuration reached successfully.")
+
     rclpy.shutdown()
+    executor_thread.join()
+    
+    
+    
+    
+    
+    
 
 
 if __name__ == "__main__":
     main()
+'''

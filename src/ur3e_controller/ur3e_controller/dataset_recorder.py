@@ -223,7 +223,7 @@ class DatasetRecorder(Node):
             return
         
         # print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
-        # print(f"  Joint positions: {observation[:6]}")
+        print(f"  Joint positions: {observation[:6]}")
 
         self._observations.append(observation)
         self._actions.append(action)

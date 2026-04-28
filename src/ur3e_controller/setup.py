@@ -23,8 +23,10 @@ setup(
             'data_collection = ur3e_controller.data_collection:main',
             'trajectory_control_test = ur3e_controller.trajectory_control_test:main',
             'trajectory_control = ur3e_controller.trajectory_control:main',
+            'trajectory_control_moveit = ur3e_controller.trajectory_control_moveit:main',
             'dataset_recorder = ur3e_controller.dataset_recorder:main',
             'imitation_control = ur3e_controller.imitation_control:main',
+            'imitation_moveit_control = ur3e_controller.imitation_moveit_control:main',
         ],
     },
 )
