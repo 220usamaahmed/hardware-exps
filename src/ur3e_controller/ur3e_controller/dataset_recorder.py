@@ -113,6 +113,9 @@ class DatasetRecorder(Node):
         self._latest_joint_cmd = LatestMsg(self._stamp_to_sec(msg.header.stamp), msg)
 
     def _on_gripper_state(self, msg: UInt8) -> None:
+        
+        print("Gripper State", msg)
+        
         self._latest_gripper_state = LatestMsg(self._now_sec(), msg)
 
     def _on_depth(self, msg: Image) -> None:

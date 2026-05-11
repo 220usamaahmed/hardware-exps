@@ -19,7 +19,6 @@ from pymoveit2 import MoveIt2
 import threading
 from collections import deque
 
-
 np.set_printoptions(suppress=True)
 torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -295,7 +294,8 @@ class ImitationMoveitControl(Node):
             joint_names=self._joint_names,
             base_link_name="base_link",
             end_effector_name="tool0",
-            group_name="ur_manipulator"
+            group_name="ur_manipulator",
+            use_move_group_action=True,
         )
         
         print("Initializing Robot Framework...")
@@ -333,6 +333,8 @@ class ImitationMoveitControl(Node):
         self._prev_gripper_state: bool | None = None
         self._next_gripper_state: bool | None = None
         self._gripper_release_timer = None
+        
+        # Initial gripper state, set to 1 for placing models
         self._obs_gripper_state = 0.0
 
         
@@ -340,8 +342,11 @@ class ImitationMoveitControl(Node):
         self.flow_matching_policy=ConditionalDiffusionModel()
         
         # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_pick3_processed_without_data_augmentation_epoch_320.pt', map_location=self.device)
-        check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_pick3_with_incermental_joint_actions_processed_with_data_augmentation_epoch_1900.pt', map_location=self.device)
-        # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_all_pick_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_400.pt', map_location=self.device)
+        # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_pick3_with_incermental_joint_actions_processed_with_data_augmentation_epoch_3000.pt', map_location=self.device)
+        # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/weights_5_may/flow_matching_real_world_data_all_pick_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_6400.pt', map_location=self.device)        
+        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_open_left_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_9950.pt", map_location=self.device)
+        
+        check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_all_skills_with_incermental_joint_actions_processed_without_data_augmentation_epoch_4000.pt", map_location=self.device)
         
         print("Loading flow matching policy from checkpoint")
         
@@ -388,6 +393,7 @@ class ImitationMoveitControl(Node):
             self._name_to_index = {name: i for i, name in enumerate(msg.name)}
         self._latest_joint_state = LatestMsg(self._stamp_to_sec(msg.header.stamp), msg)
         self.joint_observations.append((self._latest_joint_state.stamp_sec, self._extract_joint_vector(msg)))
+       # print("---- Latest joint observation: ", self.joint_observations[-1])
 
     def _on_depth(self, msg: Image) -> None:
         self._latest_depth = LatestMsg(self._stamp_to_sec(msg.header.stamp), msg)
@@ -418,6 +424,7 @@ class ImitationMoveitControl(Node):
         
         if not self.executing_actions:
             if self.motion_start_time is None and self.motion_end_time is None:
+
                 self.motion_start_time = self.joint_observations[0][0]
                 self.motion_end_time = self.joint_observations[-1][0]
             
@@ -434,29 +441,33 @@ class ImitationMoveitControl(Node):
         
         start_time = self.motion_start_time
         end_time = self.motion_end_time
+        print(f"Motion start time in inference: {start_time}, Motion end time: {end_time}")
         
         duration = end_time - start_time
         time_delta = duration / 10
+        print("time delta: ", time_delta)
         
         self._obs_queue.clear()
         for t in np.arange(start_time + 5 * time_delta, end_time, time_delta):
             closest_joint_obs = min(self.joint_observations, key=lambda obs: abs(obs[0] - t))
             closest_depth_obs = min(self.depth_observations, key=lambda obs: abs(obs[0] - t))
             
-            # print(f"{t}, {closest_joint_obs[0]}, {closest_depth_obs[0]}")
+            print(f"{t}, {closest_joint_obs[0]}, {closest_depth_obs[0]}")
             
             # if abs(closest_joint_obs[0] - t) > time_delta or abs(closest_depth_obs[0] - t) > time_delta:
             #     self.get_logger().warn(f"No close observation found for time {t:.2f}. Skipping this timestamp.")
             #     continue
             
             joints = closest_joint_obs[1]
+            print("Closest joint observation: ", joints)
             joints = np.append(joints, self._obs_gripper_state)
             
             depth = closest_depth_obs[1]
             depth = depth[70:190, 190:490]
             depth = np.nan_to_num(depth, nan=10.0)
             depth = np.clip(depth, 0, 0.8)
-            
+
+                        
             self._obs_queue.append(Observation(joints, depth))
 
         observations = list(self._obs_queue)[-self._obs_window:]
@@ -501,9 +512,10 @@ class ImitationMoveitControl(Node):
         # self._next_checkpoint = np.sum(joint_deltas, axis=0) + self._obs_queue[-1].joints[:6]
         self._next_checkpoint = np.sum(joint_deltas, axis=0) + self.joint_observations[-1][1][:6]
         
-        print(f"Actions: {np.sum(joint_deltas, axis=0)}")
-        print(f"Current joint state: {self._obs_queue[-1].joints[:6]}")
-        print(f"Next checkpoint: {self._next_checkpoint}")
+        print(f"Actions: {np.sum(joint_deltas, axis=0)*180.0/np.pi}")
+      #  print(f"Current joint state: {self._obs_queue[-1].joints[:6]}")
+        print(f"Current joint state: {self.joint_observations[-1][1][:6]*180.0/np.pi}")
+        print(f"Next checkpoint: {self._next_checkpoint*180.0/np.pi}")
         
     def _execute_gripper_action_if_ready(self):
         if self._next_gripper_state is None:
@@ -580,11 +592,20 @@ class ImitationMoveitControl(Node):
         def move_to_checkpoint():            
             self.get_logger().info("Moving to next checkpoint...")
             self.motion_start_time = time.time()
-            self.moveit2.move_to_configuration(checkpoint, self._joint_names, tolerance=0.005)
+            print("start time before motion: ", self.motion_start_time)
+            print("joints before motion: ", self.joint_observations[-1][1][:6]*180.0/np.pi)
+            print("checkpoint: ", checkpoint*180.0/np.pi)
+            self.moveit2.move_to_configuration(checkpoint, self._joint_names, tolerance=0.001)
             self.get_logger().info("Waiting for movement to complete...")
             
-            self.moveit2.wait_until_executed()
+            if not self.moveit2.wait_until_executed():
+                self.get_logger().error("Failed to execute movement to checkpoint.")
+            # time.sleep(2)
             self.motion_end_time = time.time()
+            print("end time after motion: ", self.motion_end_time)
+            joints_after_motion = self.joint_observations[-1][1][:6]*180.0/np.pi
+            print(f"Reached checkpoint after action. Current joint state: {joints_after_motion}")
+            print(f"Difference from checkpoint: {(joints_after_motion - checkpoint*180.0/np.pi)}")
             self.executing_actions = False
             
             # Dummy motion
