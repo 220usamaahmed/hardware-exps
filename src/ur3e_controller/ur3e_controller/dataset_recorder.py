@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import UInt8
+from std_msgs.msg import UInt8, Int32
 from std_srvs.srv import Trigger
 from control_msgs.msg import JointJog
 
@@ -26,35 +26,34 @@ class DatasetRecorder(Node):
         self.declare_parameter("sync_tolerance_sec", 0.3)
         self.declare_parameter("output_dir", "/home/siddiquieu1/ur3e-trajectories")
         self.declare_parameter("stop_output_dir", "")
-        self.declare_parameter("joint_names", [
-            "shoulder_pan_joint",
-            "shoulder_lift_joint",
-            "elbow_joint",
-            "wrist_1_joint",
-            "wrist_2_joint",
-            "wrist_3_joint",
-        ])
+        self.declare_parameter(
+            "joint_names",
+            [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+        )
         self.declare_parameter("joint_states_topic", "/joint_states")
-        self.declare_parameter("joint_command_topic", "/servo_node/delta_joint_cmds_raw")
+        self.declare_parameter(
+            "joint_command_topic", "/servo_node/delta_joint_cmds_raw"
+        )
         self.declare_parameter("gripper_state_topic", "/gripper_state")
         self.declare_parameter("depth_topic", "/zed/zed_node/depth/depth_registered")
         self.declare_parameter("start_service", "/dataset_recorder/start")
         self.declare_parameter("stop_service", "/dataset_recorder/stop")
 
         self._sample_rate_hz = float(self.get_parameter("sample_rate_hz").value)
-        self._sync_tolerance_sec = float(
-            self.get_parameter("sync_tolerance_sec").value
-        )
+        self._sync_tolerance_sec = float(self.get_parameter("sync_tolerance_sec").value)
         self._output_dir = str(self.get_parameter("output_dir").value)
         self._stop_output_dir = str(self.get_parameter("stop_output_dir").value)
         self._joint_names = list(self.get_parameter("joint_names").value)
         self._joint_states_topic = str(self.get_parameter("joint_states_topic").value)
-        self._joint_command_topic = str(
-            self.get_parameter("joint_command_topic").value
-        )
-        self._gripper_state_topic = str(
-            self.get_parameter("gripper_state_topic").value
-        )
+        self._joint_command_topic = str(self.get_parameter("joint_command_topic").value)
+        self._gripper_state_topic = str(self.get_parameter("gripper_state_topic").value)
         self._depth_topic = str(self.get_parameter("depth_topic").value)
         self._start_service = str(self.get_parameter("start_service").value)
         self._stop_service = str(self.get_parameter("stop_service").value)
@@ -63,6 +62,7 @@ class DatasetRecorder(Node):
         self._latest_joint_cmd: Optional[LatestMsg] = None
         self._latest_gripper_state: Optional[LatestMsg] = None
         self._latest_depth: Optional[LatestMsg] = None
+        self._latest_segment_id: int = 0
         self._name_to_index: Optional[Dict[str, int]] = None
 
         self._recording = False
@@ -82,19 +82,22 @@ class DatasetRecorder(Node):
         self.create_subscription(
             UInt8, self._gripper_state_topic, self._on_gripper_state, 10
         )
-        self.create_subscription(
-            Image, self._depth_topic, self._on_depth, 10
-        )
+        self.create_subscription(Int32, "/current_segment", self._on_segment, 10)
+        self.create_subscription(Image, self._depth_topic, self._on_depth, 10)
 
-        self._start_srv = self.create_service(Trigger, self._start_service, self._on_start)
+        self._start_srv = self.create_service(
+            Trigger, self._start_service, self._on_start
+        )
         self._stop_srv = self.create_service(Trigger, self._stop_service, self._on_stop)
 
         period = 1.0 / self._sample_rate_hz if self._sample_rate_hz > 0 else 0.0333
         self._timer = self.create_timer(period, self._sample)
 
-        self.get_logger().info("DatasetRecorder ready. Recording at {:.2f} Hz with sync tolerance of {:.2f} sec.".format(
-            self._sample_rate_hz, self._sync_tolerance_sec
-        ))
+        self.get_logger().info(
+            "DatasetRecorder ready. Recording at {:.2f} Hz with sync tolerance of {:.2f} sec.".format(
+                self._sample_rate_hz, self._sync_tolerance_sec
+            )
+        )
 
     def _now_sec(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
@@ -113,15 +116,20 @@ class DatasetRecorder(Node):
         self._latest_joint_cmd = LatestMsg(self._stamp_to_sec(msg.header.stamp), msg)
 
     def _on_gripper_state(self, msg: UInt8) -> None:
-        
+
         print("Gripper State", msg)
-        
+
         self._latest_gripper_state = LatestMsg(self._now_sec(), msg)
+
+    def _on_segment(self, msg: Int32) -> None:
+        self._latest_segment_id = msg.data
 
     def _on_depth(self, msg: Image) -> None:
         self._latest_depth = LatestMsg(self._stamp_to_sec(msg.header.stamp), msg)
 
-    def _on_start(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+    def _on_start(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
         if self._recording:
             response.success = True
             response.message = "Already recording."
@@ -133,7 +141,7 @@ class DatasetRecorder(Node):
         #     if not os.path.exists(session_dir):
         #         break
         #     index_in_folder += 1
-        
+
         # self._session_dir = os.path.join(self._output_dir, f"{self._stop_output_dir}_{index_in_folder:04d}")
         # os.makedirs(self._session_dir, exist_ok=True)
         self._frame_index = 0
@@ -148,7 +156,9 @@ class DatasetRecorder(Node):
         self.get_logger().info(response.message)
         return response
 
-    def _on_stop(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+    def _on_stop(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
         if not self._recording:
             response.success = True
             response.message = "Not recording."
@@ -160,29 +170,31 @@ class DatasetRecorder(Node):
         #     response.message = "No active session directory."
         #     return response
 
-        obs = np.stack(self._observations) if self._observations else np.zeros((0, 9))
+        obs = np.stack(self._observations) if self._observations else np.zeros((0, 10))
         act = np.stack(self._actions) if self._actions else np.zeros((0, 9))
         ts = np.asarray(self._timestamps, dtype=np.float64)
         depth_frames = (
-            np.stack(self._depth_frames)
-            if self._depth_frames
-            else np.zeros((0, 0, 0))
+            np.stack(self._depth_frames) if self._depth_frames else np.zeros((0, 0, 0))
         )
 
         stop_output_dir = str(self.get_parameter("stop_output_dir").value).strip()
-        
+
         index_in_folder = 0
         while True:
-            session_dir = os.path.join(self._output_dir, f"{stop_output_dir}_{index_in_folder:04d}")
+            session_dir = os.path.join(
+                self._output_dir, f"{stop_output_dir}_{index_in_folder:04d}"
+            )
             if not os.path.exists(session_dir):
                 break
             index_in_folder += 1
-        
-        self._session_dir = os.path.join(self._output_dir, f"{stop_output_dir}_{index_in_folder:04d}")
+
+        self._session_dir = os.path.join(
+            self._output_dir, f"{stop_output_dir}_{index_in_folder:04d}"
+        )
         os.makedirs(self._session_dir, exist_ok=True)
-    
+
         output_path = os.path.join(self._session_dir, "dataset.npz")
-    
+
         np.savez(
             output_path,
             observations=obs,
@@ -190,7 +202,7 @@ class DatasetRecorder(Node):
             timestamps=ts,
             depth_frames=depth_frames,
         )
-        
+
         self._depth_frames.clear()  # Clear depth frames from memory after saving
         self._observations.clear()
         self._actions.clear()
@@ -203,7 +215,7 @@ class DatasetRecorder(Node):
 
     def _sample(self) -> None:
         # print("Sampling dataset...")
-        
+
         if not self._recording:
             # print("Not recording, skipping sample.")
             return
@@ -218,13 +230,15 @@ class DatasetRecorder(Node):
         gripper_state = self._latest_gripper_state.msg
         depth = self._latest_depth.msg
 
-        observation = self._build_observation(joint_state, gripper_state)
+        observation = self._build_observation(
+            joint_state, gripper_state, self._latest_segment_id
+        )
         action = self._build_action(joint_cmd, gripper_state)
 
         depth_array = self._image_to_array(depth)
         if depth_array is None:
             return
-        
+
         # print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
         print(f"  Joint positions: {observation[:6]}")
 
@@ -240,12 +254,14 @@ class DatasetRecorder(Node):
             or self._latest_gripper_state is None
             or self._latest_depth is None
             or self._name_to_index is None
+            or self._latest_segment_id is None
         ):
             print("One or more inputs are not yet available.")
             print(f"  Latest joint state: {self._latest_joint_state is not None}")
             print(f"  Latest joint command: {self._latest_joint_cmd is not None}")
             print(f"  Latest gripper state: {self._latest_gripper_state is not None}")
             print(f"  Latest depth: {self._latest_depth is not None}")
+            print(f"  Latest segment id: {self._latest_segment_id is not None}")
             print(f"  Name to index mapping: {self._name_to_index is not None}")
             return False
 
@@ -256,14 +272,19 @@ class DatasetRecorder(Node):
             self._latest_depth,
         ):
             if abs(now_sec - latest.stamp_sec) > self._sync_tolerance_sec:
-                print(f"Latest {type(latest.msg).__name__} timestamp difference: {abs(now_sec - latest.stamp_sec):.3f} sec")
+                print(
+                    f"Latest {type(latest.msg).__name__} timestamp difference: {abs(now_sec - latest.stamp_sec):.3f} sec"
+                )
                 return False
         return True
 
-    def _build_observation(self, joint_state: JointState, gripper_state: UInt8) -> np.ndarray:
+    def _build_observation(
+        self, joint_state: JointState, gripper_state: UInt8, segment_id: int
+    ) -> np.ndarray:
         joints = self._extract_joint_vector(joint_state)
         gripper_onehot = self._gripper_onehot(gripper_state.data)
-        return np.concatenate([joints, gripper_onehot])
+        segment = np.array([segment_id], dtype=np.float32)
+        return np.concatenate([joints, gripper_onehot, segment])
 
     def _build_action(self, joint_cmd: JointJog, gripper_state: UInt8) -> np.ndarray:
         velocities = self._extract_velocity_vector(joint_cmd)
@@ -281,7 +302,9 @@ class DatasetRecorder(Node):
 
     def _extract_velocity_vector(self, joint_cmd: JointJog) -> np.ndarray:
         velocities = np.zeros(len(self._joint_names), dtype=np.float32)
-        name_to_index: Dict[str, int] = {name: i for i, name in enumerate(joint_cmd.joint_names)}
+        name_to_index: Dict[str, int] = {
+            name: i for i, name in enumerate(joint_cmd.joint_names)
+        }
         for i, name in enumerate(self._joint_names):
             idx = name_to_index.get(name)
             if idx is None or idx >= len(joint_cmd.velocities):

@@ -9,7 +9,7 @@ from rclpy.parameter import Parameter
 from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
-from std_msgs.msg import UInt8
+from std_msgs.msg import UInt8, Int32
 from control_msgs.msg import JointJog
 from ecpmi_gripper.srv import GripperControl
 import random
@@ -21,11 +21,12 @@ JointWaypoint = List[float]
 
 @dataclass
 class Step:
-    kind: str  # "waypoint", "gripper", "recorder_start", "recorder_stop", "wait"
+    kind: str  # "waypoint", "gripper", "recorder_start", "recorder_stop", "wait", "start-segment"
     waypoint: Optional[JointWaypoint] = None
     gripper_command: Optional[str] = None
     wait_sec: float = 0.0
     output_dir: Optional[str] = None
+    segment_id: Optional[int] = None
 
 
 class TrajectoryControl(Node):
@@ -94,6 +95,7 @@ class TrajectoryControl(Node):
         self._gripper_wait_sec = 0.0
         self._last_vel_log_sec: Optional[float] = None
         self._gripper_state = 0.0
+        self._current_segment_id = 0
         self._recorder_start_timer = None
         self._recorder_stop_future: Optional[rclpy.task.Future] = None
         self._shutdown_deadline_sec: Optional[float] = None
@@ -106,7 +108,10 @@ class TrajectoryControl(Node):
         )
         self._gripper_state_pub = self.create_publisher(
             UInt8, self._gripper_state_topic,10
+        )segment_pub = self.create_publisher(
+            Int32, "/current_segment", 10
         )
+        self._
         self._joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
@@ -134,6 +139,7 @@ class TrajectoryControl(Node):
         self._control_timer = self.create_timer(self._control_period, self._control_step)
 
         self._publish_gripper_state(self._gripper_state)
+        self._publish_segment(self._current_segment_id)
 
         self.get_logger().info(
             f"TrajectoryControl ready. Publishing joint commands on {self._command_topic} now"
@@ -143,6 +149,11 @@ class TrajectoryControl(Node):
         msg = UInt8()
         msg.data = int(state)
         self._gripper_state_pub.publish(msg)
+
+    def _publish_segment(self, segment_id: int) -> None:
+        msg = Int32()
+        msg.data = int(segment_id)
+        self._segment_pub.publish(msg)
 
     def _set_gripper_state(self, state: int) -> None:
         if self._gripper_state != state:
@@ -518,109 +529,6 @@ class TrajectoryControl(Node):
             
             Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/open_right/open_right"),
         ]
-            
-        return [
-            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-            Step(kind="recorder_start"),
-            Step(kind="wait", wait_sec=1.0),
-            
-            Step(kind="waypoint", waypoint=to_rad(drop)),
-            
-            Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
-            
-            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/place_right2/place_right"),
-            
-            Step(kind="waypoint", waypoint=to_rad(home)),
-        ]
-        
-        return [
-            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-            Step(kind="recorder_start"),
-            Step(kind="wait", wait_sec=1.0),
-
-            Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-
-            Step(kind="waypoint", waypoint=to_rad(gripping)),
-
-
-            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-
-            Step(kind="waypoint", waypoint=to_rad(home)),
-            
-            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/pick13/pick")
-        ]
-
-        # return [
-            
-        #     ### Drawer open
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-        #     Step(kind="recorder_start"),
-            
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
-            
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(gripping_pull_1)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_2)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_pull_3)),
-            
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home_l)),
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="wait", wait_sec=0.5),
-
-        #     Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/open_drawer_left/open_drawer_left"),
-            
-        #     Step(kind="wait", wait_sec=5.0),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(reset_pose)),
-        #     # Step(kind="waypoint", waypoint=to_rad(grip_0["gripping"])),
-            
-        #     ### Drawer pick and place
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(pick_prepare)),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(pick)),
-            
-        #     # Step(kind="gripper", gripper_command="grip", wait_sec=0.5),
-        #     # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(lift)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/pick/pick"),
-            
-        #     # Step(kind="wait", wait_sec=2.0),
-            
-        #     # Step(kind="recorder_start"),
-            
-        #     # # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
-        #     # # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
-            
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.5),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/siddiquieu1/ur3e-trajectories/place_right/place_right"),
-        # ] * 1
 
     def _try_start_servo(self) -> None:
         if not self._auto_start_servo:
@@ -766,6 +674,10 @@ class TrajectoryControl(Node):
             print("-"*20)
             self._handle_wait_step(step)
             return
+        if step.kind == "start-segment":
+            self._current_segment_id = step.segment_id if step.segment_id is not None else 0
+            self._current_step_index += 1
+            return
         if step.kind == "gripper":
             self._handle_gripper_step(step)
             return
@@ -775,6 +687,7 @@ class TrajectoryControl(Node):
             return
         
         self._set_gripper_state(self._gripper_state)
+        self._publish_segment(self._current_segment_id)
 
         # Need a valid joint state before we can move
         if self._current_joints is None:
