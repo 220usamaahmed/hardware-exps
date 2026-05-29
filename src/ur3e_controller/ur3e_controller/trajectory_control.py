@@ -77,7 +77,33 @@ class _SmoothViaPath:
             self._seg2.append(
                 _HermiteSegment(q_via_u[i], v_via, q_final_u[i], 0.0, self._t2)
             )
+        self.q_start = list(q_start)
+        self.q_via = list(q_via_u)
         self.q_final = q_final_u
+        self.path_length = max(total_dist, 0.01)
+        self.via_u = self._t1 / self.duration if self.duration > 0.0 else 0.5
+
+    def position_at_u(self, u: float) -> List[float]:
+        u = min(max(u, 0.0), 1.0)
+        positions, _ = self.evaluate(u * self.duration)
+        return positions
+
+    def find_progress_u(self, q_current: List[float], u_min: float = 0.0) -> float:
+        """Project q_current onto the path, searching forward from u_min only."""
+        u_min = min(max(u_min, 0.0), 1.0)
+        best_u = u_min
+        best_err = float("inf")
+        steps = 64
+        for i in range(steps + 1):
+            u = u_min + (1.0 - u_min) * i / steps
+            q = self.position_at_u(u)
+            err = max(
+                abs(_joint_angle_error(c, r)) for c, r in zip(q_current, q)
+            )
+            if err < best_err:
+                best_err = err
+                best_u = u
+        return best_u
 
     @staticmethod
     def _hermite_eval(seg: _HermiteSegment, t: float) -> Tuple[float, float]:
@@ -152,6 +178,9 @@ class TrajectoryControl(Node):
         self.declare_parameter("joint_tolerance", 0.01)  # rad
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
         self.declare_parameter("velocity_noise_std", 0.0)  # rad/s
+        self.declare_parameter(
+            "smooth_path_lookahead_u", 0.12
+        )  # fraction of path ahead for steering target
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -172,6 +201,9 @@ class TrajectoryControl(Node):
         self._joint_tolerance = float(self.get_parameter("joint_tolerance").value)
         self._min_joint_speed = float(self.get_parameter("min_joint_speed").value)
         self._velocity_noise_std = float(self.get_parameter("velocity_noise_std").value)
+        self._smooth_path_lookahead_u = float(
+            self.get_parameter("smooth_path_lookahead_u").value
+        )
 
         # UR3e joint order used by MoveIt (and Servo)
         self._joint_names: List[str] = [
@@ -205,7 +237,7 @@ class TrajectoryControl(Node):
         self.additive_noise = [0.0] * 6  # Initialize additive noise for each joint
         self.noise_counter_max = 1000
         self._smooth_path: Optional[_SmoothViaPath] = None
-        self._smooth_path_t0: Optional[float] = None
+        self._smooth_path_u: float = 0.0
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
@@ -799,7 +831,19 @@ class TrajectoryControl(Node):
 
     def _clear_smooth_path(self) -> None:
         self._smooth_path = None
-        self._smooth_path_t0 = None
+        self._smooth_path_u = 0.0
+
+    def _advance_smooth_path_progress(self) -> None:
+        """March progress along the path at roughly max joint speed."""
+        assert self._smooth_path is not None
+        du = self._max_joint_speed * self._control_period / self._smooth_path.path_length
+        du = min(du, 0.05)
+        self._smooth_path_u = min(1.0, self._smooth_path_u + du)
+
+        projected_u = self._smooth_path.find_progress_u(
+            self._current_joints, u_min=self._smooth_path_u
+        )
+        self._smooth_path_u = max(self._smooth_path_u, projected_u)
 
     def _handle_smooth_waypoints_step(self, step: Step, now_sec: float) -> None:
         self._set_gripper_state(self._gripper_state)
@@ -832,31 +876,30 @@ class TrajectoryControl(Node):
                 self._max_joint_speed,
                 step.duration_sec,
             )
-            self._smooth_path_t0 = now_sec
+            self._smooth_path_u = 0.0
             self.get_logger().info(
                 f"Starting smooth-waypoints step {self._current_step_index + 1} "
-                f"(duration={self._smooth_path.duration:.2f}s)"
+                f"(path length={self._smooth_path.path_length:.2f} rad, "
+                f"via u={self._smooth_path.via_u:.2f})"
             )
 
         assert self._smooth_path is not None
-        assert self._smooth_path_t0 is not None
 
-        elapsed = now_sec - self._smooth_path_t0
-        q_ref, q_dot_ref = self._smooth_path.evaluate(elapsed)
+        self._advance_smooth_path_progress()
+
+        u_target = min(
+            self._smooth_path_u + self._smooth_path_lookahead_u, 1.0
+        )
+        q_target = self._smooth_path.position_at_u(u_target)
 
         errors: List[float] = []
         max_err = 0.0
-        for current, ref in zip(self._current_joints, q_ref):
-            e = _joint_angle_error(current, ref)
+        for current, goal in zip(self._current_joints, q_target):
+            e = _joint_angle_error(current, goal)
             errors.append(e)
             max_err = max(max_err, abs(e))
 
-        # velocities = [
-        #     q_dot + self._k_p_joint * e
-        #     for q_dot, e in zip(q_dot_ref, errors)
-        # ]
         velocities = self._errors_to_velocities(errors, max_err)
-        velocities = self._clamp_joint_velocities(velocities)
         self._publish_joint_command(velocities)
 
         final_errors = [
@@ -864,9 +907,9 @@ class TrajectoryControl(Node):
             for c, g in zip(self._current_joints, self._smooth_path.q_final)
         ]
         at_final = max(final_errors) < self._joint_tolerance
-        trajectory_done = elapsed >= self._smooth_path.duration
+        path_done = self._smooth_path_u >= 1.0 - 1e-3
 
-        if trajectory_done and at_final:
+        if path_done and at_final:
             self.get_logger().info(
                 f"Completed smooth-waypoints step {self._current_step_index + 1}/{len(self._steps)}"
             )
