@@ -361,7 +361,7 @@ class TrajectoryControl(Node):
         w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
         w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
         w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
-        id1 = [-107.98, -50.06, -124.78, -14.28, 90.00, 3.23]
+        id1 = [-106.55, -40.54, -120.97, -12.71, 90.00, 24.60]
         id2 = [-110.41, -19.88, -116.55, -10.87, 90.00, 4.19]
         iu1 = [-102.37, -82.28, -131.71, -4.32, 93.39, 6.79]
         iu2 = [-101.53, -77.68, -131.71, -4.33, 93.39, -0.77]
@@ -401,7 +401,7 @@ class TrajectoryControl(Node):
         # w3 = [-68.37, 102.99, -45.49, 10.74, 95.10, 11.03]
         # w4 = [-72.21, 109.41, -54.23, 6.86, 101.31, 7.04]
         
-        id = random.choice([id1, id2])
+        # id = random.choice([id1, id2])
         id = random.choice([id1])
         iu = random.choice([iu1, iu2])
 
@@ -851,10 +851,11 @@ class TrajectoryControl(Node):
             errors.append(e)
             max_err = max(max_err, abs(e))
 
-        velocities = [
-            q_dot + self._k_p_joint * e
-            for q_dot, e in zip(q_dot_ref, errors)
-        ]
+        # velocities = [
+        #     q_dot + self._k_p_joint * e
+        #     for q_dot, e in zip(q_dot_ref, errors)
+        # ]
+        velocities = self._errors_to_velocities(errors, max_err)
         velocities = self._clamp_joint_velocities(velocities)
         self._publish_joint_command(velocities)
 
