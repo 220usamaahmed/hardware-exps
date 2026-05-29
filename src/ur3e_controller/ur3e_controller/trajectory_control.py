@@ -103,7 +103,7 @@ class TrajectoryControl(Node):
         self.recorder_stopping = False
         self.noise_counter = 0
         self.additive_noise = [0.0] * 6  # Initialize additive noise for each joint
-        self.noise_counter_max = 1000
+        self.noise_counter_max = 1500
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
@@ -532,11 +532,11 @@ class TrajectoryControl(Node):
         # ] * 8
         
         # Left 1            
-        # grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
-        # w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
-        # w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
-        # w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
-        # w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
+        grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
+        w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
+        w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
+        w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
+        w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
         
         # Left 2
         # grip = [-131.76, -68.77, -160.65, -30.05, 89.94, -31.39]
@@ -553,11 +553,11 @@ class TrajectoryControl(Node):
         # w4 = [-102.65, -115.16, -146.02, -6.86, 92.63, -8.27]
         
         # Right 1
-        grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
-        w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
-        w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
-        w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
-        w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
+        # grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
+        # w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
+        # w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
+        # w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
+        # w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
         
         # Right 2
         # grip = [-56.51, 83.31, -30.63, 32.13, 87.73, 32.49]
@@ -662,6 +662,35 @@ class TrajectoryControl(Node):
             
         #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/place_right3/place_right"),
         # ]
+        
+        return [
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="recorder_start"),
+            Step(kind="wait", wait_sec=1.0),
+            
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(w1)),
+            # Step(kind="waypoint", waypoint=to_rad(grip)),
+            
+            # # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            # Step(kind="wait", wait_sec=1.0),
+            
+            # Step(kind="waypoint", waypoint=to_rad(w1)),
+            # Step(kind="waypoint", waypoint=to_rad(w2)),
+            # Step(kind="waypoint", waypoint=to_rad(w3)),
+            # Step(kind="waypoint", waypoint=to_rad(w4)),
+            
+            # # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            # Step(kind="wait", wait_sec=0.1),
+            
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(
+                kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/test/open_left/open_left"
+            ),
+        ]
             
         return [
             # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
@@ -917,23 +946,27 @@ class TrajectoryControl(Node):
         max_err = 0.0
         # print("Current joints:", [math.degrees(j) for j in self._current_joints])
         # print("Target waypoint:", [math.degrees(t) for t in target])
-        # scale  = 1 / np.exp(0.1 * (30 - self.noise_counter)) if self.noise_counter > 0 else 0.0
-        # scale  = self.noise_counter / self.noise_counter_max if self.noise_counter > 0 else 0.0
-        # scale = np.exp(-np.square(self.noise_counter - self.noise_counter_max // 2) / 20000) if self.noise_counter > 0 else 0.0
-        scale = np.square(np.sin(np.pi * self.noise_counter / self.noise_counter_max)) if self.noise_counter > 0 else 0.0
-        print(f"Noise counter: {self.noise_counter}, scale: {scale:.2f}")
+        
+        # scale = np.square(np.sin(np.pi * self.noise_counter / self.noise_counter_max)) if self.noise_counter > 0 else 0.0
+        # print(f"Noise counter: {self.noise_counter}, scale: {scale:.2f}")
+        
+        # error_scalling = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]) + np.sin(4 * np.pi * self.noise_counter / self.noise_counter_max) / 2 + 0.5
+        
+        error_scalling = np.ones(len(self._joint_names))
+        # for i in range(0, len(self._joint_names)):
+        #     error_scalling[i] = 0.5 + np.sin(3 * np.pi * self.noise_counter / self.noise_counter_max) / 2 + 0.5
         
         for i, (current, goal) in enumerate(zip(self._current_joints, target)):
             e = math.atan2(math.sin(goal - current), math.cos(goal - current))
             
-            added_noise = self.additive_noise[i] * scale
+            # added_noise = self.additive_noise[i] * scale
             # print(f"Joint {i}: error={e:.2f} rad, noise_i = {self.noise_counter} scale = {scale:.2f}, noise={added_noise:.2f} rad")
             
-            e += added_noise
-            errors.append(e)
+            # e += added_noise
+            errors.append(e * error_scalling[i])
             max_err = max(max_err, abs(e))
             
-        self.noise_counter = max(0, self.noise_counter - 1)
+        # self.noise_counter = max(0, self.noise_counter - 1)
 
         # Check if the target is reached
         if max_err < self._joint_tolerance:
@@ -971,7 +1004,8 @@ class TrajectoryControl(Node):
     def _reset_noise(self) -> None:
         print("Resetting velocity noise...")
         self.noise_counter = self.noise_counter_max
-        self.additive_noise = [random.uniform(-1, 1) for _ in self._joint_names]
+        self.additive_noise = [random.uniform(0.15, 0.85) for _ in self._joint_names]
+        # self.additive_noise = [0, 0, 0, 0, 0, 0]
     
 
     def _handle_gripper_step(self, step: Step) -> None:
@@ -1091,13 +1125,30 @@ class TrajectoryControl(Node):
         if self._velocity_noise_std <= 0.0:
             return velocities
         noisy: List[float] = []
-      #  print("Applying velocity noise:", self._velocity_noise_std)
-        for v in velocities:
-            # noisy_v = v + random.gauss(0.0, self._velocity_noise_std)
-            noisy_v = v * (1.0 + random.uniform(-self._velocity_noise_std, self._velocity_noise_std))
+        #  print("Applying velocity noise:", self._velocity_noise_std)
+        # for v in velocities:
+        #     # noisy_v = v + random.gauss(0.0, self._velocity_noise_std)
+        #     noisy_v = v * (1.0 + random.uniform(-self._velocity_noise_std, self._velocity_noise_std))
+        #     if abs(noisy_v) > self._max_joint_speed > 0.0:
+        #         noisy_v = math.copysign(self._max_joint_speed, noisy_v)
+        #     noisy.append(noisy_v)
+            
+        x = self.noise_counter / self.noise_counter_max
+        p = self.additive_noise
+        
+        y = np.pow(x, np.log(0.5) / np.log(p))
+        n = np.square(np.sin(np.pi * y))
+        
+        self.noise_counter = max(0, self.noise_counter - 1)
+        
+        print(f"Noise counter: {self.noise_counter}, n: {np.round(n, 3)}, velocities: {velocities}")
+        
+        for i, v in enumerate(velocities):
+            noisy_v = v + 1.0 * n[i]
+            noisy.append(noisy_v)
             if abs(noisy_v) > self._max_joint_speed > 0.0:
                 noisy_v = math.copysign(self._max_joint_speed, noisy_v)
-            noisy.append(noisy_v)
+        
         return noisy
 
 
