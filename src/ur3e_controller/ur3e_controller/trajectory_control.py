@@ -1,7 +1,7 @@
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -19,12 +19,112 @@ import numpy as np
 JointWaypoint = List[float]
 
 
+def _unwrap_goal(current: float, goal: float) -> float:
+    return current + math.atan2(math.sin(goal - current), math.cos(goal - current))
+
+
+def _joint_angle_error(current: float, goal: float) -> float:
+    return math.atan2(math.sin(goal - current), math.cos(goal - current))
+
+
+@dataclass
+class _HermiteSegment:
+    p0: float
+    v0: float
+    p1: float
+    v1: float
+    duration: float
+
+
+class _SmoothViaPath:
+    """C¹ cubic Hermite path: q_start -> q_via -> q_final with zero end velocities."""
+
+    def __init__(
+        self,
+        q_start: List[float],
+        q_via: List[float],
+        q_final: List[float],
+        max_speed: float,
+        duration_sec: Optional[float] = None,
+    ) -> None:
+        n = len(q_start)
+        q_via_u = [_unwrap_goal(q_start[i], q_via[i]) for i in range(n)]
+        q_final_u = [_unwrap_goal(q_via_u[i], q_final[i]) for i in range(n)]
+
+        d1 = max(abs(q_via_u[i] - q_start[i]) for i in range(n))
+        d2 = max(abs(q_final_u[i] - q_via_u[i]) for i in range(n))
+        total_dist = d1 + d2
+
+        if duration_sec is not None and duration_sec > 0.0:
+            self.duration = duration_sec
+            if total_dist > 0.0:
+                self._t1 = duration_sec * (d1 / total_dist)
+            else:
+                self._t1 = duration_sec * 0.5
+            self._t2 = duration_sec - self._t1
+        else:
+            self._t1 = max(d1 / max_speed, 0.1) if d1 > 0.0 else 0.1
+            self._t2 = max(d2 / max_speed, 0.1) if d2 > 0.0 else 0.1
+            self.duration = self._t1 + self._t2
+
+        self._seg1: List[_HermiteSegment] = []
+        self._seg2: List[_HermiteSegment] = []
+        for i in range(n):
+            v_via = (q_final_u[i] - q_start[i]) / self.duration
+            self._seg1.append(
+                _HermiteSegment(q_start[i], 0.0, q_via_u[i], v_via, self._t1)
+            )
+            self._seg2.append(
+                _HermiteSegment(q_via_u[i], v_via, q_final_u[i], 0.0, self._t2)
+            )
+        self.q_final = q_final_u
+
+    @staticmethod
+    def _hermite_eval(seg: _HermiteSegment, t: float) -> Tuple[float, float]:
+        duration = seg.duration
+        if duration <= 0.0:
+            return seg.p1, 0.0
+        s = min(max(t / duration, 0.0), 1.0)
+        s2 = s * s
+        s3 = s2 * s
+        h00 = 2.0 * s3 - 3.0 * s2 + 1.0
+        h10 = s3 - 2.0 * s2 + s
+        h01 = -2.0 * s3 + 3.0 * s2
+        h11 = s3 - s2
+        pos = h00 * seg.p0 + h10 * duration * seg.v0 + h01 * seg.p1 + h11 * duration * seg.v1
+        inv_t = 1.0 / duration
+        dh00 = (6.0 * s2 - 6.0 * s) * inv_t
+        dh10 = 3.0 * s2 - 4.0 * s + 1.0
+        dh01 = (-6.0 * s2 + 6.0 * s) * inv_t
+        dh11 = 3.0 * s2 - 2.0 * s
+        vel = dh00 * seg.p0 + dh10 * seg.v0 + dh01 * seg.p1 + dh11 * seg.v1
+        return pos, vel
+
+    def evaluate(self, t: float) -> Tuple[List[float], List[float]]:
+        positions: List[float] = []
+        velocities: List[float] = []
+        if t <= self._t1:
+            segments = self._seg1
+            local_t = t
+        else:
+            segments = self._seg2
+            local_t = t - self._t1
+        for seg in segments:
+            pos, vel = self._hermite_eval(seg, local_t)
+            positions.append(pos)
+            velocities.append(vel)
+        return positions, velocities
+
+
 @dataclass
 class Step:
-    kind: str  # "waypoint", "gripper", "recorder_start", "recorder_stop", "wait", "start-segment"
+    kind: str  # "waypoint", "smooth-waypoints", "gripper", ...
     waypoint: Optional[JointWaypoint] = None
+    waypoint_via: Optional[JointWaypoint] = None
+    waypoint_final: Optional[JointWaypoint] = None
     gripper_command: Optional[str] = None
     wait_sec: float = 0.0
+    duration_sec: Optional[float] = None
     output_dir: Optional[str] = None
     segment_id: Optional[int] = None
 
@@ -51,7 +151,7 @@ class TrajectoryControl(Node):
         self.declare_parameter("max_joint_speed", 1.0)  # rad/s
         self.declare_parameter("joint_tolerance", 0.01)  # rad
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
-        self.declare_parameter("velocity_noise_std", 0.1) # rad/s
+        self.declare_parameter("velocity_noise_std", 0.1)  # rad/s
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -63,15 +163,15 @@ class TrajectoryControl(Node):
         self._recorder_start_service = str(
             self.get_parameter("recorder_start_service").value
         )
-        self._recorder_stop_service = str(self.get_parameter("recorder_stop_service").value)
+        self._recorder_stop_service = str(
+            self.get_parameter("recorder_stop_service").value
+        )
         self._record_enabled = bool(self.get_parameter("record").value)
         self._k_p_joint = float(self.get_parameter("k_p_joint").value)
         self._max_joint_speed = float(self.get_parameter("max_joint_speed").value)
         self._joint_tolerance = float(self.get_parameter("joint_tolerance").value)
         self._min_joint_speed = float(self.get_parameter("min_joint_speed").value)
-        self._velocity_noise_std = float(
-            self.get_parameter("velocity_noise_std").value
-        )
+        self._velocity_noise_std = float(self.get_parameter("velocity_noise_std").value)
 
         # UR3e joint order used by MoveIt (and Servo)
         self._joint_names: List[str] = [
@@ -104,6 +204,8 @@ class TrajectoryControl(Node):
         self.noise_counter = 0
         self.additive_noise = [0.0] * 6  # Initialize additive noise for each joint
         self.noise_counter_max = 1000
+        self._smooth_path: Optional[_SmoothViaPath] = None
+        self._smooth_path_t0: Optional[float] = None
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
@@ -113,13 +215,13 @@ class TrajectoryControl(Node):
         self._gripper_state_pub = self.create_publisher(
             UInt8, self._gripper_state_topic, 10
         )
-        self._segment_pub = self.create_publisher(
-            Int32, "/current_segment", 10
-        )
+        self._segment_pub = self.create_publisher(Int32, "/current_segment", 10)
         self._joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._joint_state_callback, 10
         )
-        self._start_servo_client = self.create_client(Trigger, self._start_servo_service)
+        self._start_servo_client = self.create_client(
+            Trigger, self._start_servo_service
+        )
         self._gripper_client = self.create_client(GripperControl, self._gripper_service)
         self._recorder_start_client = None
         self._recorder_stop_client = None
@@ -138,9 +240,13 @@ class TrajectoryControl(Node):
         if self._auto_start_servo:
             self._start_servo_timer = self.create_timer(1.0, self._try_start_servo)
         if self._record_enabled:
-            self._recorder_start_timer = self.create_timer(1.0, self._try_start_recorder)
+            self._recorder_start_timer = self.create_timer(
+                1.0, self._try_start_recorder
+            )
 
-        self._control_timer = self.create_timer(self._control_period, self._control_step)
+        self._control_timer = self.create_timer(
+            self._control_period, self._control_step
+        )
 
         self._publish_gripper_state(self._gripper_state)
         self._publish_segment(self._current_segment_id)
@@ -201,435 +307,96 @@ class TrajectoryControl(Node):
         "wrist_3_joint",
         "shoulder_pan_joint",
         """
-        
+
         def to_rad(waypoint_deg: JointWaypoint) -> JointWaypoint:
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
-        
+
         random.seed(time.time())
 
         # Waypoints are specified in degrees and converted to radians.
         home_noise_deviations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
-        
         home = [-90.00, 0.00, -90.00, 0.00, 90.00, -0.00]
-        home_with_noise = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
-        home_with_noise_2 = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
-        home_with_noise_3 = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
-        
-        grip_0 = {
-            "gripping_prepare": [-113.23, -101.83, -144.09, -20.17, 90.70, -20.18],
-            "gripping": [-126.14, -80.31, -153.01, -32.99, 91.05, -32.97],
-            "gripping_pull_1": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_2": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_3": [-105.65, -113.10, -139.43, -9.46, 89.73, -9.45],
-        }
-        
-        grip_1 = {
-            "gripping_prepare": [-113.23, -101.83, -144.09, -20.17, 90.70, -20.18],
-            "gripping": [-126.14, -80.31, -153.01, -32.99, 91.05, -32.97],
-            "gripping_pull_1": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_2": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_3": [-105.65, -113.10, -139.43, -9.46, 89.73, -9.45],
-        }
-        
-        grip_2 = {
-            "gripping_prepare": [-113.23, -101.83, -144.09, -20.17, 90.70, -20.18],
-            "gripping": [-126.14, -80.31, -153.01, -32.99, 91.05, -32.97],
-            "gripping_pull_1": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_2": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_3": [-105.65, -113.10, -139.43, -9.46, 89.73, -9.45],
-        }
-        
-        grip_6 = {
-            "gripping_prepare": [-129.49, -40.22, -100.18, 90.12, 88.33, -69.73],
-            "gripping": [-128.52, -54.32, -87.06, 90.12, 88.36, -69.73],
-            
-            "gripping_prepare_1": [-50.88, 42.11, -81.33, -89.56, 92.75, 77.77],
-            "gripping_1": [-51.48, 54.90, -93.52, -89.57, 92.81, 77.80],
-            
-            "gripping_midpoint_2_1": [-93.57, -44.54, -105.36, 74.47, 90.77, -75.8],
-            "gripping_midpoint_2_2": [-116.8, -44.59, -99.57, 86.34, 90.77, -74.29],
-            "gripping_prepare_2": [-132.32, -35.39, -103.51, 92.75, 93.24, -71.05],
-            "gripping_2": [-130.77, -49.93, -90.52, 92.75, 93.27, -71.05],
-            
-            "gripping_midpoint_3_1": [-109.38, -34.21, -120.06, 82.95, 90.07, -56.82],
-            "gripping_prepare_3": [-132.66, -33.10, -105.75, 89.8, 89.98, -70.21],
-            "gripping_3": [-130.07, -51.71, -88.30, 91.86, 75.15, -71.05],
-            
-            
-            "gripping_midpoint_4_1": [-120.89, -19.36, -129.08, 91.0, 87.8, -79.74],
-            "gripping_prepare_4": [-130.39, -39.77, -100.33, 89.23, 88.62, -69.64],
-            "gripping_4": [-129.49, -53.34, -87.66, 89.24, 88.65, -69.65],
-            
-            
-            "gripping_pull_1": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_2": [-116.63, -96.40, -146.23, -24.18, 90.86, -24.18],
-            "gripping_pull_3": [-105.65, -113.10, -139.43, -9.46, 89.73, -9.45],
-        }
-        
-        grip_7 = {
-            
-            "gripping_prepare": [-127.31, -44.27, -98.32, 90.11, 97.67, -77.82],
-            "gripping": [-126.77, -57.25, -85.87, 90.12, 97.69, -77.83],
-        
-            "gripping_prepare_1": [-53.08, 43.72, -80.74, -89.56, 87.02, 69.08],
-            "gripping_1": [-53.73, 57.57, -93.94, -89.57, 87.08, 69.11],
-        }
-        
-       
-       
-        
-        grip_8 = {            
-            "gripping_prepare": [-107.25, -77.34, -85.32, 90.01, 70.47, -75.42],
-            "gripping": [-108.66, -85.41, -75.83, 90.02, 70.47, -75.44],
-            
-            "gripping_prepare_1": [-72.48, 74.21, -91.82, -89.61, 77.11, 65.42],
-            "gripping_1": [-71.01, 84.58, -103.67, -89.62, 77.16, 65.44],
-        }
-        
-        
-        grip_9 = {
-            
-            "gripping_prepare": [-105.92, -75.54, -88.44, 90.01, 89.44, -64.84],
-            "gripping": [-107.54, -86.85, -75.50, 90.02, 89.45, -64.86],
-            
-           # "gripping_midpoint_1": [-79.36, 41.53, -76.39, -85.07, 47.32, 53.14],
-            "gripping_prepare_1": [-74.02, 77.06, -93.12, -89.61, 92.68, 75.54],
-            "gripping_1": [-72.48, 86.67, -104.30, -89.62, 92.73, 75.56],
-        }
-             
-             
-        
-        grip_10 = {
-            
-            "gripping_prepare": [-118.54, -56.94, -94.41, 90.06, 91.07, -67.20],
-            "gripping": [-119.03, -69.78, -81.08, 90.08, 91.09, -67.21],
-            
-           # "gripping_midpoint_1": [-79.36, 41.53, -76.39, -85.07, 47.32, 53.14],
-            "gripping_prepare_1": [-61.72, 58.45, -86.82, -89.58, 90.61, 77.31],
-            "gripping_1": [-61.13, 69.82, -98.79, -89.59, 90.66, 77.33],
-        }
-      
-      
-        grip_11 = {
-            
-            "gripping_prepare": [-117.54, -58.86, -93.49, 90.06, 88.037, -77.83],
-            "gripping": [-118.23, -71.39, -80.28, 90.08, 88.38, -77.84],
-            
-           # "gripping_midpoint_1": [-79.36, 41.53, -76.39, -85.07, 47.32, 53.14],
-            "gripping_prepare_1": [-62.86, 60.37, -87.61, -89.58, 88.76, 66.7],
-            "gripping_1": [-62.07, 71.79, -99.82, -89.59, 88.82, 66.71],
-        }      
-      
- 
-        grip_12 = {
-            
-            "gripping_prepare": [-108.49, -73.86, -87.56, 90.06, 91.45, -68.61],
-            "gripping": [-109.92, -83.64, -76.34, 90.03, 91.46, -68.63],
-            
-           # "gripping_midpoint_1": [-79.36, 41.53, -76.39, -85.07, 47.32, 53.14],
-            "gripping_prepare_1": [-71.73, 73.15, -91.52, -89.61, 89.69, 73.03],
-            "gripping_1": [-70.23, 83.84, -103.71, -89.62, 89.74, 73.05],
-        }      
-      
- 
-        grip_13 = {
-            
-            "gripping_prepare": [-117.64, -59.31, -92.95, 90.06, 90.30, -72.54],
-            "gripping": [-118.33, -71.19, -80.37, 90.07, 90.31, -72.55],
-            
-           # "gripping_midpoint_1": [-79.36, 41.53, -76.39, -85.07, 47.32, 53.14],
-            "gripping_prepare_1": [-62.77, 60.61, -87.94, -89.58, 88.66, 72.12],
-            "gripping_1": [-62.06, 71.24, -99.29, -89.59, 88.71, 72.15],
-        }
-        
-        grip_14 = {
-            "gripping_prepare": [-129.15, -40.80, -99.95, 90.12, 93.58, -73.66],
-            "gripping": [-128.25, -55.03, -86.61, 90.12, 93.61, -73.66],
-            
-            "gripping_prepare_1": [-49.35, 32.96, -73.71, -89.56, 91.81, 72.90],
-            "gripping_1": [-51.88, 54.19, -92.42, -89.57, 91.89, 72.94],
-        }
-          
-        grip_15 = {
-            "gripping_prepare": [-124.01, -42.06, -103.83, 90.08, 84.71, -67.05],
-            "gripping": [-122.68, -64.41, -82.81, 90.09, 84.74, -67.06],
-            
-            "gripping_prepare_1": [-57.30, 48.24, -81.05, -89.57, 91.97, 78.46],
-            "gripping_1": [-57.51, 64.81, -97.40, -89.58, 92.04, 78.50],
-        }
-        
-        grip_16 = {
-            "gripping_prepare": [-109.33, -64.95, -95.61, 90.01, 82.37, -62.37],
-            "gripping": [-110.74, -83.66, -75.49, 90.03, 82.38, -62.40],
-            
-            "gripping_prepare_1": [-71.02, 66.09, -85.17, -89.60, 92.93, 79.19],
-            "gripping_1": [-69.84, 82.69, -102.95, -89.61, 93.01, 79.22],
-        }
-        
-        grip_17 = {
-            "gripping_prepare": [-109.83, -64.36, -95.71, 90.01, 87.60, -78.69],
-            "gripping": [-110.87, -81.88, -77.14, 90.03, 87.61, -78.72],
-            
-            "gripping_prepare_1": [-70.81, 67.16, -86.45, -89.60, 90.92, 62.79],
-            "gripping_1": [-69.58, 82.22, -102.74, -89.61, 90.99, 62.82],
-        }
-        
-        grip_18 = {
-            "gripping_prepare": [-115.40, -61.82, -92.50, 89.83, 97.30, -65.39],
-            "gripping": [-116.21, -74.00, -79.51, 89.85, 97.32, -65.40],
-            
-            "gripping_prepare_1": [-64.79, 58.56, -84.21, -89.34, 107.21, 78.87],
-            "gripping_1": [-64.14, 74.67, -100.98, -89.36, 107.28, 78.90],
-        }
-        
-        grip_19 = {
-            "gripping_prepare": [-110.04, -66.69, -92.83, 89.51, 103.23, -59.30],
-            "gripping": [-111.31, -81.61, -76.64, 89.52, 103.23, -59.33],
-            
-            "gripping_prepare_1": [-71.18, 72.44, -92.00, -89.10, 110.12, 81.59],
-            "gripping_1": [-69.91, 82.38, -103.21, -89.11, 110.16, 81.60],
-        }
-        
-        grip_20 = {
-            "gripping_prepare": [-107.89, -69.50, -91.82, 89.29, 94.70, -67.64],
-            "gripping": [-109.24, -84.02, -75.94, 89.31, 94.71, -67.66],
-            
-            "gripping_prepare_1": [-72.52, 71.67, -90.01, -88.70, 102.19, 73.52],
-            "gripping_1": [-70.96, 84.80, -104.69, -88.71, 102.25, 73.54],
-        }
-        
-        grip_21 = {
-            "gripping_prepare": [-110.67, -62.45, -95.65, 89.08, 91.21, -70.92],
-            "gripping": [-111.68, -81.42, -75.80, 89.10, 91.23, -70.95],
-            
-            "gripping_prepare_1": [-69.61, 66.98, -88.45, -88.33, 99.53, 70.67],
-            "gripping_1": [-68.30, 81.03, -103.81, -88.34, 99.59, 70.70],
-        }
-        
+        home_with_noise = [
+            angle + random.uniform(-deviation, deviation)
+            for angle, deviation in zip(home, home_noise_deviations)
+        ]
+
         grip_center = {
             "gripping_prepare": [-120.02, -51.74, -98.13, 90.07, 88.82, -72.64],
             "gripping": [-120.04, -68.39, -81.47, 90.08, 88.84, -72.65],
-            
             "gripping_prepare_1": [-61.30, 53.02, -82.03, -89.31, 88.72, 72.04],
             "gripping_1": [-61.13, 70.20, -99.37, -89.32, 88.80, 72.07],
         }
-        
-        #gripper_choice = random.choice([grip_0, grip_1, grip_2])
+
         gripper_choice = random.choice([grip_center])
-        # print("Selected gripper trajectory:")
-        # for key, value in gripper_choice.items():
-        #     print(f"  {key}: {value}")
-        
-        # gripper_choice = grip_0
-        
+
         gripping_prepare = gripper_choice["gripping_prepare_1"]
         gripping = gripper_choice["gripping_1"]
-        
+
         # gripping_prepare = gripper_choice["gripping_prepare_1"]
         # gripping = gripper_choice["gripping_1"]
-        
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        # ]
-        
-        # Picking 
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
-            
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/pick25/pick"),
-        # ]
-        
-   #     gripping_pull_1 = gripper_choice["gripping_pull_1"]
-   #     gripping_pull_2 = gripper_choice["gripping_pull_2"]
-    #    gripping_pull_3 = gripper_choice["gripping_pull_3"]
-        
-        reset_pose = grip_0["gripping_pull_3"]
-        #reset_pose[5] = 4.0
-        reset_pose[5] = 0.0
+
         ## Pick and place left drawer
-        
+
         lift = [-107.66, -23.45, -139.67, 90.22, 0.21, -64.52]
         lift = [angle + random.uniform(-2, 2) for angle in lift]
-        
+
         hover_over_left = [-123.76, -23.52, -105.79, 90.23, 0.21, -47.43]
         hover_over_left = [angle + random.uniform(-2, 2) for angle in hover_over_left]
-        
+
         put_in_left = [-133.61, -26.93, -108.49, 90.23, 0.21, -47.44]
         put_in_left = [angle + random.uniform(-1, 1) for angle in put_in_left]
-        
+
         ## Pick and place right drawer
-        
-        # hover_over_right = [-119.74, -23.53, -110.53, 86.06, 5.38, -100.57]
+
         hover_over_right = [-85.24, 70.69, -105.86, -77.93, 89.84, 36.87]
         hover_over_right = [angle + random.uniform(-2, 2) for angle in hover_over_right]
-        
-        # put_in_right = [-133.95, -23.62, -110.28, 86.05, 5.38, -100.57]
+
         put_in_right = [-72.68, 70.60, -106.79, -77.93, 89.84, 39.15]
         put_in_right = [angle + random.uniform(-1, 1) for angle in put_in_right]
-        
-        # pick_prepare = [-108.99, -67.52, -81.50, 87.93, -0.11, -71.75] # Middle
-        # pick_prepare = [-107.11, -75.61, -86.48, 89.74, 9.77, -63.34] # Left
-        pick_prepare = [-106.42, -74.75, -87.63, 89.64, -5.45, -78.59] # Right
-        
-        # pick = [-120.08, -68.45, -81.19, 84.13, 3.18, -69.55]  # Middle
-        # pick = [-108.64, -85.47, -75.10, 89.75, 9.77, -63.36] # Left
-        pick = [-108.02, -86.21, -74.57, 89.66, -5.45, -78.61] # Right
 
-        # return [
-        #    Step(kind="waypoint", waypoint=to_rad(home)),
-        # ]
-        
-        # drop = [-117.81, -51.64, -88.21, 87.26, 80.07, -44.76]
-        drop = [-55.11, 31.30, -74.43, -83.17, 89.97, 42.98]
-        drop_noise_deviations = [0, 0, 0, 2, 4, 3]
-        drop = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(drop, drop_noise_deviations)]
-        
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        # ]
-        
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="reset_noise"),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(w1)),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(grip)),
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(w1)),
-        #     Step(kind="waypoint", waypoint=to_rad(w2)),
-        #     Step(kind="waypoint", waypoint=to_rad(w3)),
-        #     Step(kind="waypoint", waypoint=to_rad(w4)),
-            
-        #     Step(kind="reset_noise"),
-            
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/drawer/open_right/open_right"),
-            
-        #     Step(kind="hold")
-        # ] * 8
-        
-        # Left 1            
+        # Left 1
         # grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
         # w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
         # w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
         # w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
         # w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
-        
+
         # Left 2
         # grip = [-131.76, -68.77, -160.65, -30.05, 89.94, -31.39]
         # w1 = [-126.52, -78.09, -156.69, -25.99, 90.06, -27.35]
         # w2 = [-120.94, -87.61, -153.00, -20.55, 90.32, -21.93]
         # w3 = [-113.55, -99.50, -149.69, -10.67, 91.54, -12.06]
         # w4 = [-110.97, -103.52, -151.28, -4.89, 94.60, -6.28]
-        
+
         # Left 3
         # grip = [-125.47, -79.93, -155.61, -33.94, 89.73, -35.28]
         # w1 = [-119.03, -90.79, -151.31, -28.66, 89.85, -30.02]
         # w2 = [-113.14, -100.13, -148.06, -22.59, 90.07, -23.97]
         # w3 = [-106.15, -110.38, -145.54, -13.27, 90.85, -14.67]
         # w4 = [-102.65, -115.16, -146.02, -6.86, 92.63, -8.27]
-        
+
         # Right 1
         grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
         w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
         w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
         w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
         w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
-        
+
         # Right 2
         # grip = [-56.51, 83.31, -30.63, 32.13, 87.73, 32.49]
         # w1 = [-61.11, 91.04, -34.23, 28.26, 88.25, 28.63]
         # w2 = [-67.18, 100.72, -38.93, 22.22, 89.40, 22.60]
         # w3 = [-75.64, 113.26, -47.09, 12.38, 93.60, 12.72]
         # w4 = [-80.82, 120.87, -56.88, 6.95, 101.03, 7.17]
-        
+
         # Right 3
         # grip = [-50.55, 72.98, -26.68, 28.42, 88.29, 28.76]
         # w1 = [-54.82, 80.52, -30.49, 24.98, 88.87, 25.32]
         # w2 = [-60.98, 90.99, -36.22, 19.02, 90.36, 19.36]
         # w3 = [-68.37, 102.99, -45.49, 10.74, 95.10, 11.03]
         # w4 = [-72.21, 109.41, -54.23, 6.86, 101.31, 7.04]
-        
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     # Step(kind="recorder_start"),
-        #     # Step(kind="wait", wait_sec=1.0),
-            
-        #     # # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(w1)),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(grip)),
-        #     # Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
-        #     # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(w1)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w2)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w3)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w4)),
-            
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     # # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/open_left/open_left"),
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/open_right/open_right"),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     # Step(kind="reset_noise"),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
-            
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     # Step(kind="reset_noise"),
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/pick/pick"),
-            
-        #     # Step(kind="recorder_start"),
-        #     # Step(kind="wait", wait_sec=1.0),
-            
-        #     # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
-            
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/coombined/place_right/place_right"),
-        # ]
-        
+
         """
         0: Not yet set
         1: Open Drawer Left
@@ -638,76 +405,57 @@ class TrajectoryControl(Node):
         4: Place Left
         5: Place Right
         """
-        
-        
-        
-        # Placing
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_left)),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     Step(kind="waypoint", waypoint=to_rad(put_in_right)),
-            
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/place_right3/place_right"),
-        # ]
-            
+
         return [
-            # Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-            # Step(kind="start-segment", segment_id=1), # Open Drawer
-            
-            # Step(kind="wait", wait_sec=1.0),
-            
-            # # Step(kind="recorder_start"),
-            # Step(kind="wait", wait_sec=1.0),
-            
-            # Step(kind="waypoint", waypoint=to_rad(w1)),
-            
-            # Step(kind="waypoint", waypoint=to_rad(grip)),
-            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-            # Step(kind="waypoint", waypoint=to_rad(w1)),
-            # Step(kind="waypoint", waypoint=to_rad(w2)),
-            # Step(kind="waypoint", waypoint=to_rad(w3)),
-            # Step(kind="waypoint", waypoint=to_rad(w4)),
-            
-            # Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
-            
-            # Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
-            
-            # Step(kind="start-segment", segment_id=3), # Pick
-            
-            # Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-            # Step(kind="waypoint", waypoint=to_rad(gripping)),
-            
-            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-            # Step(kind="waypoint", waypoint=to_rad(home_with_noise_2)),
-            
-            Step(kind="start-segment", segment_id=4), # Place Left
-            
-            Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
-            Step(kind="waypoint", waypoint=to_rad(put_in_left)),
-            
-            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
+            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            Step(kind="start-segment", segment_id=1),  # Open Drawer
+            Step(kind="wait", wait_sec=1.0),
+            Step(kind="recorder_start"),
+            Step(kind="wait", wait_sec=1.0),
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(w1),
+                waypoint_final=to_rad(grip),
+            ),
+            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(w1),
+                waypoint_final=to_rad(w2),
+            ),
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(w2),
+                waypoint_final=to_rad(w3),
+            ),
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(w3),
+                waypoint_final=to_rad(w4),
+            ),
+            Step(kind="gripper", gripper_command="blow", wait_sec=1.0),
             Step(kind="waypoint", waypoint=to_rad(home)),
-            
-            # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/st/st"),
+            Step(kind="start-segment", segment_id=3),  # Pick
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(gripping_prepare),
+                waypoint_final=to_rad(gripping),
+            ),
+            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            Step(kind="start-segment", segment_id=4),  # Place Left
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(hover_over_left),
+                waypoint_final=to_rad(put_in_left),
+            ),
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            Step(
+                kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/st/st"
+            ),
         ]
 
     def _try_start_servo(self) -> None:
@@ -779,7 +527,7 @@ class TrajectoryControl(Node):
     def _request_recorder_stop(self) -> None:
         if not self._record_enabled:
             return
-    
+
         # if self._recorder_stop_future is not None:
         #     return
         if self._recorder_stop_client is None:
@@ -797,7 +545,7 @@ class TrajectoryControl(Node):
         self._recorder_stop_future = self._recorder_stop_client.call_async(
             Trigger.Request()
         )
-        
+
         def callback(future):
             try:
                 response = future.result()
@@ -806,14 +554,12 @@ class TrajectoryControl(Node):
                     self._current_step_index += 1
                     self.recorder_stopping = False
                 else:
-                    self.get_logger().warn(
-                        f"Recorder stop failed: {response.message}"
-                    )
+                    self.get_logger().warn(f"Recorder stop failed: {response.message}")
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().warn(f"Failed to stop recorder: {exc}")
-        
+
         self._recorder_stop_future.add_done_callback(callback)
-        
+
         # self._recorder_stop_future = self._recorder_stop_client.call(
         #     Trigger.Request()
         # )
@@ -831,14 +577,15 @@ class TrajectoryControl(Node):
                 if response.success:
                     self.get_logger().info("Dataset recorder stopped.")
                 else:
-                    self.get_logger().warn(
-                        f"Recorder stop failed: {response.message}"
-                    )
+                    self.get_logger().warn(f"Recorder stop failed: {response.message}")
             except Exception as exc:  # noqa: BLE001
                 self.get_logger().warn(f"Failed to stop recorder: {exc}")
             rclpy.shutdown()
             return
-        if self._shutdown_deadline_sec is not None and now_sec >= self._shutdown_deadline_sec:
+        if (
+            self._shutdown_deadline_sec is not None
+            and now_sec >= self._shutdown_deadline_sec
+        ):
             self.get_logger().warn("Recorder stop timeout. Shutting down.")
             rclpy.shutdown()
 
@@ -879,24 +626,29 @@ class TrajectoryControl(Node):
             self._handle_recorder_stop_step()
             return
         if step.kind == "wait":
-            print("-"*20)
+            print("-" * 20)
             print(f"Waiting for {step.wait_sec} seconds...")
-            print("-"*20)
+            print("-" * 20)
             self._handle_wait_step(step)
             return
         if step.kind == "start-segment":
-            self._current_segment_id = step.segment_id if step.segment_id is not None else 0
+            self._current_segment_id = (
+                step.segment_id if step.segment_id is not None else 0
+            )
             self._publish_segment(self._current_segment_id)
             self._current_step_index += 1
             return
         if step.kind == "gripper":
             self._handle_gripper_step(step)
             return
+        if step.kind == "smooth-waypoints":
+            self._handle_smooth_waypoints_step(step, now_sec)
+            return
 
         if step.kind != "waypoint" or step.waypoint is None:
             self._abort_with_error("Invalid step configuration; stopping node.")
             return
-        
+
         self._set_gripper_state(self._gripper_state)
         self._publish_segment(self._current_segment_id)
 
@@ -920,19 +672,23 @@ class TrajectoryControl(Node):
         # scale  = 1 / np.exp(0.1 * (30 - self.noise_counter)) if self.noise_counter > 0 else 0.0
         # scale  = self.noise_counter / self.noise_counter_max if self.noise_counter > 0 else 0.0
         # scale = np.exp(-np.square(self.noise_counter - self.noise_counter_max // 2) / 20000) if self.noise_counter > 0 else 0.0
-        scale = np.square(np.sin(np.pi * self.noise_counter / self.noise_counter_max)) if self.noise_counter > 0 else 0.0
+        scale = (
+            np.square(np.sin(np.pi * self.noise_counter / self.noise_counter_max))
+            if self.noise_counter > 0
+            else 0.0
+        )
         print(f"Noise counter: {self.noise_counter}, scale: {scale:.2f}")
-        
+
         for i, (current, goal) in enumerate(zip(self._current_joints, target)):
-            e = math.atan2(math.sin(goal - current), math.cos(goal - current))
-            
+            e = _joint_angle_error(current, goal)
+
             added_noise = self.additive_noise[i] * scale
             # print(f"Joint {i}: error={e:.2f} rad, noise_i = {self.noise_counter} scale = {scale:.2f}, noise={added_noise:.2f} rad")
-            
+
             e += added_noise
             errors.append(e)
             max_err = max(max_err, abs(e))
-            
+
         self.noise_counter = max(0, self.noise_counter - 1)
 
         # Check if the target is reached
@@ -949,30 +705,121 @@ class TrajectoryControl(Node):
             return
 
         # Normalize velocities so all joints finish at the same time
+        velocities = self._errors_to_velocities(errors, max_err)
+        if any(abs(v) > 0.0 for v in velocities):
+            if (
+                self._last_vel_log_sec is None
+                or now_sec - self._last_vel_log_sec >= 1.0
+            ):
+                self._last_vel_log_sec = now_sec
+        self._publish_joint_command(velocities)
+
+    def _errors_to_velocities(
+        self, errors: List[float], max_err: float
+    ) -> List[float]:
         velocities: List[float] = []
         for e in errors:
-            normalized_speed = (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
+            normalized_speed = (
+                (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
+            )
             v = math.copysign(normalized_speed, e)
-
-            # Clamp each joint speed
             if abs(v) > self._max_joint_speed > 0.0:
                 v = math.copysign(self._max_joint_speed, v)
             velocities.append(v)
+        return velocities
 
-        if any(abs(v) > 0.0 for v in velocities):
-            if self._last_vel_log_sec is None or now_sec - self._last_vel_log_sec >= 1.0:
-                self._last_vel_log_sec = now_sec
-                # self.get_logger().info(f"Joint velocities: {velocities}")
-                # self.get_logger().info(f"Joint errors: {errors}")
-                # self.get_logger().info("--")
+    def _clamp_joint_velocities(self, velocities: List[float]) -> List[float]:
+        clamped: List[float] = []
+        for v in velocities:
+            if abs(v) > self._max_joint_speed > 0.0:
+                v = math.copysign(self._max_joint_speed, v)
+            clamped.append(v)
+        return clamped
+
+    def _clear_smooth_path(self) -> None:
+        self._smooth_path = None
+        self._smooth_path_t0 = None
+
+    def _handle_smooth_waypoints_step(self, step: Step, now_sec: float) -> None:
+        self._set_gripper_state(self._gripper_state)
+        self._publish_segment(self._current_segment_id)
+
+        if self._current_joints is None:
+            self._publish_joint_command([0.0] * len(self._joint_names))
+            return
+
+        q_via = step.waypoint_via
+        q_final = step.waypoint_final
+        if q_via is None or q_final is None:
+            self._abort_with_error(
+                "smooth-waypoints step requires waypoint_via and waypoint_final."
+            )
+            return
+        if len(q_via) != len(self._joint_names) or len(q_final) != len(
+            self._joint_names
+        ):
+            self._abort_with_error(
+                "Smooth waypoint length does not match number of joints; stopping node."
+            )
+            return
+
+        if self._smooth_path is None:
+            self._smooth_path = _SmoothViaPath(
+                self._current_joints,
+                q_via,
+                q_final,
+                self._max_joint_speed,
+                step.duration_sec,
+            )
+            self._smooth_path_t0 = now_sec
+            self.get_logger().info(
+                f"Starting smooth-waypoints step {self._current_step_index + 1} "
+                f"(duration={self._smooth_path.duration:.2f}s)"
+            )
+
+        assert self._smooth_path is not None
+        assert self._smooth_path_t0 is not None
+
+        elapsed = now_sec - self._smooth_path_t0
+        q_ref, q_dot_ref = self._smooth_path.evaluate(elapsed)
+
+        errors: List[float] = []
+        max_err = 0.0
+        for current, ref in zip(self._current_joints, q_ref):
+            e = _joint_angle_error(current, ref)
+            errors.append(e)
+            max_err = max(max_err, abs(e))
+
+        velocities = [
+            q_dot + self._k_p_joint * e
+            for q_dot, e in zip(q_dot_ref, errors)
+        ]
+        velocities = self._clamp_joint_velocities(velocities)
         self._publish_joint_command(velocities)
-    
-    
+
+        final_errors = [
+            abs(_joint_angle_error(c, g))
+            for c, g in zip(self._current_joints, self._smooth_path.q_final)
+        ]
+        at_final = max(final_errors) < self._joint_tolerance
+        trajectory_done = elapsed >= self._smooth_path.duration
+
+        if trajectory_done and at_final:
+            self.get_logger().info(
+                f"Completed smooth-waypoints step {self._current_step_index + 1}/{len(self._steps)}"
+            )
+            self._clear_smooth_path()
+            if step.wait_sec > 0.0:
+                self._waiting_until_sec = now_sec + step.wait_sec
+                self._advance_after_wait = True
+                self._publish_joint_command([0.0] * len(self._joint_names))
+                return
+            self._current_step_index += 1
+
     def _reset_noise(self) -> None:
         print("Resetting velocity noise...")
         self.noise_counter = self.noise_counter_max
         self.additive_noise = [random.uniform(-1, 1) for _ in self._joint_names]
-    
 
     def _handle_gripper_step(self, step: Step) -> None:
         self._publish_joint_command([0.0] * len(self._joint_names))
@@ -1027,7 +874,9 @@ class TrajectoryControl(Node):
             self._current_step_index += 1
             return
         if self._recorder_start_client is None:
-            self._abort_with_error("Recorder start client not initialized; stopping node.")
+            self._abort_with_error(
+                "Recorder start client not initialized; stopping node."
+            )
             return
         if not self._recorder_start_client.wait_for_service(timeout_sec=0.1):
             self.get_logger().warn(
@@ -1041,9 +890,9 @@ class TrajectoryControl(Node):
     def _handle_recorder_stop_step(self) -> None:
         if self.recorder_stopping:
             return
-        
+
         self.recorder_stopping = True
-        
+
         if not self._record_enabled:
             self._current_step_index += 1
             return
@@ -1073,7 +922,7 @@ class TrajectoryControl(Node):
     def _publish_joint_command(self, velocities: List[float]) -> None:
         raw_msg = self._build_joint_jog(velocities)
         self._joint_cmd_raw_pub.publish(raw_msg)
-        
+
         noisy_velocities = self._apply_velocity_noise(velocities)
         noisy_msg = self._build_joint_jog(noisy_velocities)
         self._joint_cmd_pub.publish(noisy_msg)
@@ -1087,14 +936,17 @@ class TrajectoryControl(Node):
         msg.duration = 0.0
         return msg
 
-    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:        
+    def _apply_velocity_noise(self, velocities: List[float]) -> List[float]:
         if self._velocity_noise_std <= 0.0:
             return velocities
         noisy: List[float] = []
-      #  print("Applying velocity noise:", self._velocity_noise_std)
+        #  print("Applying velocity noise:", self._velocity_noise_std)
         for v in velocities:
             # noisy_v = v + random.gauss(0.0, self._velocity_noise_std)
-            noisy_v = v * (1.0 + random.uniform(-self._velocity_noise_std, self._velocity_noise_std))
+            noisy_v = v * (
+                1.0
+                + random.uniform(-self._velocity_noise_std, self._velocity_noise_std)
+            )
             if abs(noisy_v) > self._max_joint_speed > 0.0:
                 noisy_v = math.copysign(self._max_joint_speed, noisy_v)
             noisy.append(noisy_v)
