@@ -1,3 +1,4 @@
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from einops import rearrange
 from pymoveit2 import MoveIt2
 import threading
 from collections import deque
+
 
 np.set_printoptions(suppress=True)
 torch.set_printoptions(precision=4, sci_mode=False)
@@ -173,8 +175,8 @@ class ConditionalDiffusionModel(nn.Module):
         self.depth_projection= nn.Linear(depth_features_dim, hidden_dim)
 
         self.non_visual_obs_projection= nn.Linear(sensor_dim, hidden_dim)
-
-        self.depth_encoder = SimpleCNN(1, (120,300), depth_features_dim)
+        self.non_visual_dropout=nn.Dropout(0.2)
+        self.depth_encoder = SimpleCNN(1, (190,490), depth_features_dim)
 
 
         self.time_mlp = nn.Sequential(
@@ -192,7 +194,7 @@ class ConditionalDiffusionModel(nn.Module):
         self.decoder_position_embedding=SinusoidalPositionalEncoding(hidden_dim, max_len=21)  # Action position embedding
         self.encoder_position_embedding=SinusoidalPositionalEncoding(hidden_dim, max_len=16)  # Sensor position embedding
 
-
+        self.inference_step=0
     def forward(self, depth_images , non_visual_obs, noisy_action, t):        
         batch_size=non_visual_obs.shape[0]
         context_length=non_visual_obs.shape[1]
@@ -207,6 +209,7 @@ class ConditionalDiffusionModel(nn.Module):
         depth_features=self.depth_projection(depth_features.to(torch.float32))
 
         non_visual_obs=self.non_visual_obs_projection(non_visual_obs.to(torch.float32))
+        non_visual_obs=self.non_visual_dropout(non_visual_obs)
 
         t=self.time_mlp(t.to(torch.float32))  # Time embedding
         
@@ -228,6 +231,8 @@ class ConditionalDiffusionModel(nn.Module):
             decoder_input = block(decoder_input, encoder_input)
         out=self.output_proj(decoder_input)
         out=out[:,1:,:]
+        self.inference_step+=1
+            
 
         return out
     
@@ -304,7 +309,10 @@ class ImitationMoveitControl(Node):
         def to_rad(waypoint_deg):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
         
-        home = to_rad([-0.00, -90.00, 0.00, -90.00, 0.00, 90.00])
+        home_noise_deviations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        home = [-0.00, -90.00, 0.00, -90.00, 0.00, 90.00]
+      #  home = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
+        home = to_rad(home)
         
         self.moveit2.move_to_configuration(home, self._joint_names, tolerance=0.005)
         self.moveit2.wait_until_executed()
@@ -335,7 +343,7 @@ class ImitationMoveitControl(Node):
         self._gripper_release_timer = None
         
         # Initial gripper state, set to 1 for placing models
-        self._obs_gripper_state = 0.0
+        self._obs_gripper_state = 1.0
 
         
     def load_model(self):
@@ -343,10 +351,16 @@ class ImitationMoveitControl(Node):
         
         # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_pick3_processed_without_data_augmentation_epoch_320.pt', map_location=self.device)
         # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_pick3_with_incermental_joint_actions_processed_with_data_augmentation_epoch_3000.pt', map_location=self.device)
-        # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/weights_5_may/flow_matching_real_world_data_all_pick_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_6400.pt', map_location=self.device)        
+        # check_point=torch.load('/home/shokry/ur3e-trajectories/weights/weights_5_may/flow_matching_real_world_data_all_pick_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_6400.pt', map_location=self.device)
         # check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_open_left_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_9950.pt", map_location=self.device)
         
-        check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_all_skills_with_incermental_joint_actions_processed_without_data_augmentation_epoch_4000.pt", map_location=self.device)
+        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_all_skills_with_incermental_joint_actions_processed_without_data_augmentation_epoch_4000.pt", map_location=self.device)
+        
+        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights/flow_matching_real_world_data_all_skills_with_incermental_joint_actions_processed_without_data_augmentation_epoch_12800.pt", map_location=self.device)
+        
+        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights2/flow_matching_real_world_data_all_open_drawer_data_with_incermental_joint_actions_processed_without_data_augmentation_epoch_1400.pt", map_location=self.device)
+        
+        check_point=torch.load("/home/shokry/ur3e-trajectories/weights2/flow_matching_real_world_all_tasks_early_stop_for_depth_100.pt", map_location=self.device)
         
         print("Loading flow matching policy from checkpoint")
         
@@ -426,7 +440,9 @@ class ImitationMoveitControl(Node):
             if self.motion_start_time is None and self.motion_end_time is None:
 
                 self.motion_start_time = self.joint_observations[0][0]
+                self.motion_start_joint_state = self.joint_observations[0][1]
                 self.motion_end_time = self.joint_observations[-1][0]
+                self.motion_end_joint_state = self.joint_observations[-1][1]
             
             self._maybe_start_inference()
             self._maybe_collect_inference()
@@ -445,30 +461,56 @@ class ImitationMoveitControl(Node):
         
         duration = end_time - start_time
         time_delta = duration / 10
-        print("time delta: ", time_delta)
+    #    print("time delta: ", time_delta)
         
+        
+        
+        
+        start_joint_pos= min(self.joint_observations, key=lambda obs: abs(obs[0] - start_time))[1]
+        end_joint_pos= min(self.joint_observations, key=lambda obs: abs(obs[0] - end_time))[1]
+     #   print("start joint pos: ", start_joint_pos)
+      #  print("end joint pos: ", end_joint_pos)
+        t = np.linspace(0, 1, 10)[:, None]   # shape (10, 1)
+        out = (1 - t) * start_joint_pos + t * end_joint_pos
+     #   print("interpolated joint positions: ", out)
+
+        obs_counter=5
         self._obs_queue.clear()
         for t in np.arange(start_time + 5 * time_delta, end_time, time_delta):
             closest_joint_obs = min(self.joint_observations, key=lambda obs: abs(obs[0] - t))
             closest_depth_obs = min(self.depth_observations, key=lambda obs: abs(obs[0] - t))
             
-            print(f"{t}, {closest_joint_obs[0]}, {closest_depth_obs[0]}")
+       #     print(f"{t}, {closest_joint_obs[0]}, {closest_depth_obs[0]}")
+        #    print("joint == ", closest_joint_obs[1])
             
             # if abs(closest_joint_obs[0] - t) > time_delta or abs(closest_depth_obs[0] - t) > time_delta:
             #     self.get_logger().warn(f"No close observation found for time {t:.2f}. Skipping this timestamp.")
             #     continue
             
-            joints = closest_joint_obs[1]
-            print("Closest joint observation: ", joints)
+         #   joints = closest_joint_obs[1]
+            if obs_counter >= 9:
+                obs_counter=9
+            joints = out[obs_counter]
+            obs_counter += 1
+          #  print("Closest joint observation: ", joints)
             joints = np.append(joints, self._obs_gripper_state)
             
             depth = closest_depth_obs[1]
-            depth = depth[70:190, 190:490]
+            depth = depth[:190, 100:590]
             depth = np.nan_to_num(depth, nan=10.0)
             depth = np.clip(depth, 0, 0.8)
 
                         
             self._obs_queue.append(Observation(joints, depth))
+            
+           
+            
+        #t = torch.linspace(0, 1, steps=10).unsqueeze(1)   # shape [10, 1]
+        #out = (1 - t) * self.motion_start_joint_state + t * self.motion_end_joint_state
+       # observations = out[-self._obs_window:]
+       # print("start joint state: ", self.motion_start_joint_state)
+       # print("end joint state: ", self.motion_end_joint_state)
+       # print("interpolated joint states: ", out[-self._obs_window:])
 
         observations = list(self._obs_queue)[-self._obs_window:]
         self._inference_future = self._executor.submit(self._run_model, observations)
@@ -494,10 +536,11 @@ class ImitationMoveitControl(Node):
         
         actions = np.array(actions)
         actions = actions[:10, :]
-        joint_actions = actions[:, :6] * np.pi / 180.0
+       # joint_actions = actions[:, :6] * np.pi / 180.0
+        joint_actions = actions[:, :6] /150.0
         gripper_actions = actions[:, 6]
         
-        self._next_gripper_state = (gripper_actions > 0.9).any()
+        self._next_gripper_state = (gripper_actions[5:] > 0.5).any()
         
         print("Model Actions --------------")
         print(actions)
@@ -509,13 +552,14 @@ class ImitationMoveitControl(Node):
         # Integrate actions over time to get the actual joint positions to execute
         # joint_deltas = joint_actions / self._control_rate_hz
         joint_deltas = joint_actions
+    #    print("joint actions in execution == ", joint_actions)
         # self._next_checkpoint = np.sum(joint_deltas, axis=0) + self._obs_queue[-1].joints[:6]
         self._next_checkpoint = np.sum(joint_deltas, axis=0) + self.joint_observations[-1][1][:6]
         
-        print(f"Actions: {np.sum(joint_deltas, axis=0)*180.0/np.pi}")
+      #  print(f"Actions: {np.sum(joint_deltas, axis=0)*180.0/np.pi}")
       #  print(f"Current joint state: {self._obs_queue[-1].joints[:6]}")
-        print(f"Current joint state: {self.joint_observations[-1][1][:6]*180.0/np.pi}")
-        print(f"Next checkpoint: {self._next_checkpoint*180.0/np.pi}")
+     #   print(f"Current joint state: {self.joint_observations[-1][1][:6]*180.0/np.pi}")
+     #   print(f"Next checkpoint: {self._next_checkpoint*180.0/np.pi}")
         
     def _execute_gripper_action_if_ready(self):
         if self._next_gripper_state is None:
@@ -585,6 +629,7 @@ class ImitationMoveitControl(Node):
         print(f"Executing actions")
 
         checkpoint = self._next_checkpoint
+        
         self._next_checkpoint = None
 
         self.executing_actions = True
@@ -625,17 +670,21 @@ class ImitationMoveitControl(Node):
         
         depth_images = torch.stack([torch.from_numpy(obs.depth).unsqueeze(0) for obs in observations], dim=0).unsqueeze(0)  # Shape: (obs_window, 1, H, W)
         non_visual_obs = torch.stack([torch.from_numpy(obs.joints) for obs in observations], dim=0)  # Shape: (obs_window, num_joints)
+      #  non_visual_obs_1 = torch.tensor([-3.9,-98.5,-1.04,-87.38 , 3.6,87.77,0.0])*math.pi/180.0
+       # non_visual_obs = non_visual_obs_1.unsqueeze(0).repeat(5,1)
         
         print("Model input:")
         print(non_visual_obs)
         
-        num_predicted_actions = 1
+        num_predicted_actions = 10
         action_sequence_length = 20
         num_steps = 100
         action_dim = 7
             
         depth_images = depth_images.to(device=device, dtype=torch.float32)
+
         non_visual_obs = non_visual_obs.to(device=device, dtype=torch.float32)
+        #non_visual_obs [...,:6]*=0.0
         
         depth_images = depth_images.repeat(num_predicted_actions, 1,1,1,1)
         non_visual_obs = non_visual_obs.repeat(num_predicted_actions, 1,1)     
@@ -648,9 +697,9 @@ class ImitationMoveitControl(Node):
             t_k = k * dt
             t_k_tensor = torch.tensor(t_k, device=device, dtype=torch.float32).unsqueeze(0)
             
-            v_k = self.flow_matching_policy(depth_images, non_visual_obs, x, t_k_tensor)
+            v_k = self.flow_matching_policy(depth_images, non_visual_obs, x, t_k_tensor) 
                         
-            x_pred = x + dt * v_k
+            x_pred = x + dt * v_k   # Add some noise to the predicted action for better exploration
             
             t_k1 = (k + 1) * dt
             t_k1_tensor = torch.tensor(t_k1, device=device, dtype=torch.float32).unsqueeze(0)
@@ -659,7 +708,30 @@ class ImitationMoveitControl(Node):
             
             x = x + 0.5 * dt * (v_k + v_k1)
 
-        actions = x.squeeze(0).cpu().numpy()[:, :7]
+        
+        
+        #actions = x.squeeze(0).cpu().numpy()[:, :7]
+        print("inferred actions == " )
+        for i in range(num_predicted_actions):
+            print(f"Action sequence {i}:")
+            print(x[i])#/150.0)
+            print("------------------")
+        
+       # actions = x[].cpu().numpy()[:, :7]
+        random_idx = random.randint(0, num_predicted_actions - 1)
+        idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
+        
+        actions = x[idx].cpu().numpy()[:, :7]
+        # print("Selected action sequence: ", actions / 150.0)
+      #  if self.flow_matching_policy.inference_step > 3:
+        executed_actions = actions[:10, :]*2.0
+        # joint_actions = executed_actions[:, :6] * np.pi / 180.0
+        # executed_actions[:, :6] = executed_actions[:, :6] / 150.0
+        print("chosen action  : ", executed_actions/2.0) 
+    #    input()
+        # print("")
+        
+        return executed_actions.tolist()
 
         return actions.tolist()
 

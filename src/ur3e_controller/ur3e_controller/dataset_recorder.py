@@ -122,6 +122,8 @@ class DatasetRecorder(Node):
         self._latest_gripper_state = LatestMsg(self._now_sec(), msg)
 
     def _on_segment(self, msg: Int32) -> None:
+        # print("Setting segment", msg.data)
+        
         self._latest_segment_id = msg.data
 
     def _on_depth(self, msg: Image) -> None:
@@ -170,7 +172,7 @@ class DatasetRecorder(Node):
         #     response.message = "No active session directory."
         #     return response
 
-        obs = np.stack(self._observations) if self._observations else np.zeros((0, 10))
+        obs = np.stack(self._observations) if self._observations else np.zeros((0, 10)) # 10 for current sub skill id
         act = np.stack(self._actions) if self._actions else np.zeros((0, 9))
         ts = np.asarray(self._timestamps, dtype=np.float64)
         depth_frames = (
@@ -240,6 +242,7 @@ class DatasetRecorder(Node):
             return
 
         # print(f"Recorded frame {self._frame_index:06d} at time {now_sec:.3f} sec")
+        # print(f"  Joint positions: {observation[:6]}, Segment: {observation[9]}")
         print(f"  Joint positions: {observation[:6]}")
 
         self._observations.append(observation)
@@ -284,7 +287,8 @@ class DatasetRecorder(Node):
         joints = self._extract_joint_vector(joint_state)
         gripper_onehot = self._gripper_onehot(gripper_state.data)
         segment = np.array([segment_id], dtype=np.float32)
-        return np.concatenate([joints, gripper_onehot, segment])
+        # return np.concatenate([joints, gripper_onehot, segment])
+        return np.concatenate([joints, gripper_onehot])
 
     def _build_action(self, joint_cmd: JointJog, gripper_state: UInt8) -> np.ndarray:
         velocities = self._extract_velocity_vector(joint_cmd)
