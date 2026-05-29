@@ -179,7 +179,7 @@ class TrajectoryControl(Node):
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
         self.declare_parameter("velocity_noise_std", 0.0)  # rad/s
         self.declare_parameter(
-            "smooth_path_lookahead_u", 0.12
+            "smooth_path_lookahead_u", 0.01
         )  # fraction of path ahead for steering target
 
         self._command_topic = str(self.get_parameter("command_topic").value)
@@ -393,7 +393,7 @@ class TrajectoryControl(Node):
         w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
         w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
         w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
-        id1 = [-106.55, -40.54, -120.97, -12.71, 90.00, 24.60]
+        id1 = [-110.55, -34.58, -116.41, -10.86, 89.99, 80.65]
         id2 = [-110.41, -19.88, -116.55, -10.87, 90.00, 4.19]
         iu1 = [-102.37, -82.28, -131.71, -4.32, 93.39, 6.79]
         iu2 = [-101.53, -77.68, -131.71, -4.33, 93.39, -0.77]
@@ -478,15 +478,18 @@ class TrajectoryControl(Node):
                 waypoint_final=to_rad(w1),
             ),
             Step(kind="waypoint", waypoint=to_rad(grip)),
-            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            
+            # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            Step(kind="wait", wait_sec=1.0),
             
             Step(kind="waypoint", waypoint=to_rad(w1)),
             Step(kind="waypoint", waypoint=to_rad(w2)),
             Step(kind="waypoint", waypoint=to_rad(w3)),
             Step(kind="waypoint", waypoint=to_rad(w4)),
             
-            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            Step(kind="wait", wait_sec=0.1),
             
             Step(
                 kind="smooth-waypoints",
