@@ -151,7 +151,7 @@ class TrajectoryControl(Node):
         self.declare_parameter("max_joint_speed", 1.0)  # rad/s
         self.declare_parameter("joint_tolerance", 0.01)  # rad
         self.declare_parameter("min_joint_speed", 0.01)  # rad/s
-        self.declare_parameter("velocity_noise_std", 0.1)  # rad/s
+        self.declare_parameter("velocity_noise_std", 0.0)  # rad/s
 
         self._command_topic = str(self.get_parameter("command_topic").value)
         self._control_period = float(self.get_parameter("control_period").value)
@@ -356,11 +356,15 @@ class TrajectoryControl(Node):
         put_in_right = [angle + random.uniform(-1, 1) for angle in put_in_right]
 
         # Left 1
-        # grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
-        # w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
-        # w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
-        # w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
-        # w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
+        grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
+        w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
+        w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
+        w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
+        w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
+        id1 = [-107.98, -50.06, -124.78, -14.28, 90.00, 3.23]
+        id2 = [-110.41, -19.88, -116.55, -10.87, 90.00, 4.19]
+        iu1 = [-102.37, -82.28, -131.71, -4.32, 93.39, 6.79]
+        iu2 = [-101.53, -77.68, -131.71, -4.33, 93.39, -0.77]
 
         # Left 2
         # grip = [-131.76, -68.77, -160.65, -30.05, 89.94, -31.39]
@@ -377,11 +381,11 @@ class TrajectoryControl(Node):
         # w4 = [-102.65, -115.16, -146.02, -6.86, 92.63, -8.27]
 
         # Right 1
-        grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
-        w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
-        w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
-        w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
-        w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
+        # grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
+        # w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
+        # w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
+        # w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
+        # w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
 
         # Right 2
         # grip = [-56.51, 83.31, -30.63, 32.13, 87.73, 32.49]
@@ -396,6 +400,10 @@ class TrajectoryControl(Node):
         # w2 = [-60.98, 90.99, -36.22, 19.02, 90.36, 19.36]
         # w3 = [-68.37, 102.99, -45.49, 10.74, 95.10, 11.03]
         # w4 = [-72.21, 109.41, -54.23, 6.86, 101.31, 7.04]
+        
+        id = random.choice([id1, id2])
+        id = random.choice([id1])
+        iu = random.choice([iu1, iu2])
 
         """
         0: Not yet set
@@ -405,6 +413,59 @@ class TrajectoryControl(Node):
         4: Place Left
         5: Place Right
         """
+        
+        # return [
+        #     Step(kind="waypoint", waypoint=to_rad(home)),
+        #     Step(kind="waypoint", waypoint=to_rad(w1)),
+        #     # Step(
+        #     #     kind="smooth-waypoints",
+        #     #     waypoint_via=to_rad(id),
+        #     #     waypoint_final=to_rad(w1),
+        #     # ),
+        # ]
+        
+        # return [
+        #     Step(kind="waypoint", waypoint=to_rad(w4)),
+        #     Step(kind="waypoint", waypoint=to_rad(home)),
+        #     # Step(
+        #     #     kind="smooth-waypoints",
+        #     #     waypoint_via=to_rad(iu),
+        #     #     waypoint_final=to_rad(home),
+        #     # ),
+        # ]
+        
+        return [
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="recorder_start"),
+            Step(kind="wait", wait_sec=1.0),
+            
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(id),
+                waypoint_final=to_rad(w1),
+            ),
+            Step(kind="waypoint", waypoint=to_rad(grip)),
+            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            
+            Step(kind="waypoint", waypoint=to_rad(w1)),
+            Step(kind="waypoint", waypoint=to_rad(w2)),
+            Step(kind="waypoint", waypoint=to_rad(w3)),
+            Step(kind="waypoint", waypoint=to_rad(w4)),
+            
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            
+            Step(
+                kind="smooth-waypoints",
+                waypoint_via=to_rad(iu),
+                waypoint_final=to_rad(home),
+            ),
+            
+            Step(
+                kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/smooth/open_left/open_left"
+            ),
+        ]
 
         return [
             Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
