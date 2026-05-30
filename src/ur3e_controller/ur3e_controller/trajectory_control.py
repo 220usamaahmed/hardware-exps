@@ -103,7 +103,8 @@ class TrajectoryControl(Node):
         self.recorder_stopping = False
         self.noise_counter = 0
         self.additive_noise = [0.0] * 6  # Initialize additive noise for each joint
-        self.noise_counter_max = 1500
+        self.noise_direction = [1] * 6  # Direction of noise change for each joint (1 or -1)
+        self.noise_counter_max = 1000
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
@@ -984,7 +985,7 @@ class TrajectoryControl(Node):
         # Normalize velocities so all joints finish at the same time
         velocities: List[float] = []
         for e in errors:
-            normalized_speed = (abs(e) / max_err) * self._max_joint_speed if max_err > 0 else 0.0
+            normalized_speed = (abs(e) / max_err) * self._max_joint_speed * 0.8 if max_err > 0 else 0.0
             v = math.copysign(normalized_speed, e)
 
             # Clamp each joint speed
@@ -1005,6 +1006,7 @@ class TrajectoryControl(Node):
         print("Resetting velocity noise...")
         self.noise_counter = self.noise_counter_max
         self.additive_noise = [random.uniform(0.15, 0.85) for _ in self._joint_names]
+        self.noise_direction = [random.choice([-1, 1]) for _ in self._joint_names]
         # self.additive_noise = [0, 0, 0, 0, 0, 0]
     
 
@@ -1105,10 +1107,14 @@ class TrajectoryControl(Node):
         self._publish_joint_command([0.0] * len(self._joint_names))
 
     def _publish_joint_command(self, velocities: List[float]) -> None:
-        raw_msg = self._build_joint_jog(velocities)
-        self._joint_cmd_raw_pub.publish(raw_msg)
+        # raw_msg = self._build_joint_jog(velocities)
+        # self._joint_cmd_raw_pub.publish(raw_msg)
         
         noisy_velocities = self._apply_velocity_noise(velocities)
+        
+        raw_msg = self._build_joint_jog(noisy_velocities)
+        self._joint_cmd_raw_pub.publish(raw_msg)
+        
         noisy_msg = self._build_joint_jog(noisy_velocities)
         self._joint_cmd_pub.publish(noisy_msg)
 
@@ -1144,7 +1150,7 @@ class TrajectoryControl(Node):
         print(f"Noise counter: {self.noise_counter}, n: {np.round(n, 3)}, velocities: {velocities}")
         
         for i, v in enumerate(velocities):
-            noisy_v = v + 1.0 * n[i]
+            noisy_v = v + 0.2 * n[i] * self.noise_direction[i]
             noisy.append(noisy_v)
             if abs(noisy_v) > self._max_joint_speed > 0.0:
                 noisy_v = math.copysign(self._max_joint_speed, noisy_v)
