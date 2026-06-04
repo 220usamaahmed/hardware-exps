@@ -27,6 +27,8 @@ setup(
             'dataset_recorder = ur3e_controller.dataset_recorder:main',
             'imitation_control = ur3e_controller.imitation_control:main',
             'imitation_moveit_control = ur3e_controller.imitation_moveit_control:main',
+            'imitation_moveit_control_critic = ur3e_controller.imitation_moveit_control_critic:main',
+            'imitation_moveit_control_oracle = ur3e_controller.imitation_moveit_control_oracle:main',
         ],
     },
 )

@@ -357,6 +357,19 @@ class ImitationMoveitControl(Node):
         self.motion_end_time = None
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        root = "/home/shokry/ur3e-trajectories/weights_june_2/separate_skills"
+        
+        self.model_paths = {
+            "open_drawer_left": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_open_left_marvin_ep_7500.pt",
+            "open_drawer_right": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_open_right_marvin_ep_7500.pt",
+            "pick": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_pick_marvin_ep_7300.pt",
+            "place_left": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_place_left_marvin_ep_7500.pt",
+            "place_right": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_place_right_marvin_ep_7500.pt",
+        }
+        
+        self.current_skill = "open_drawer_left"
+        
         self.load_model()
         
         self.moveit2 = MoveIt2(
@@ -374,9 +387,9 @@ class ImitationMoveitControl(Node):
         def to_rad(waypoint_deg):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
         
-        home_noise_deviations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        home_noise_deviations = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
         home = [-0.00, -90.00, 0.00, -90.00, 0.00, 90.00]
-        # home = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
+      #  home = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
         home = to_rad(home)
         
         self.moveit2.move_to_configuration(home, self._joint_names, tolerance=0.005)
@@ -395,6 +408,12 @@ class ImitationMoveitControl(Node):
         
         self._gripper_state_srv = self.create_service(
             SetBool, self._gripper_state_service, self._set_observation_gripper_state
+        )
+        
+        # Create a service to change skills using standard SetBool service with a helper
+        self.declare_parameter("next_skill", "open_drawer_left")
+        self._skill_srv = self.create_service(
+            SetBool, "/set_skill", self._set_skill_service
         )
         
         period = 1.0 / self._control_rate_hz if self._control_rate_hz > 0 else 0.0667
@@ -418,7 +437,8 @@ class ImitationMoveitControl(Node):
         
         # check_point=torch.load("/home/shokry/ur3e-trajectories/weights_31_may/open_drawer_new_setup/flow_matching_manuaaly_processed_quantized_depth_images_without_early_stopping_epochs_ep_450.pt", map_location=self.device)
         # check_point=torch.load("/home/shokry/ur3e-trajectories/weights_31_may/open_drawer_old_setup_manually_randomized_box_pos/flow_matching_real_world_all_tasks_early_stop_for_depth_150.pt", map_location=self.device)
-        check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_all_skills_marvin_ep_3950.pt", map_location=self.device)
+        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/correct_pick_data/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_all_skills_marvin_ep_2850.pt", map_location=self.device)
+        check_point=torch.load(self.model_paths[self.current_skill], map_location=self.device)
         
         print("Loading flow matching policy from checkpoint")
         
@@ -484,6 +504,37 @@ class ImitationMoveitControl(Node):
         response.message = (
             f"Observation gripper state set to {self._obs_gripper_state:.1f}."
         )
+        return response
+
+    def _set_skill_service(
+        self, request: SetBool.Request, response: SetBool.Response
+    ) -> SetBool.Response:
+        """
+        Service handler to change and reload the current skill.
+        Use ros2 param set to set the next_skill parameter before calling this service.
+        """
+        try:
+            skill_name = self.get_parameter("next_skill").value.strip().lower()
+            
+            # Validate skill name
+            if skill_name not in self.model_paths:
+                available_skills = ", ".join(self.model_paths.keys())
+                response.success = False
+                response.message = f"Invalid skill '{skill_name}'. Available skills: {available_skills}"
+                self.get_logger().error(response.message)
+                return response
+            
+            self.current_skill = skill_name
+            self.get_logger().info(f"Changing skill to: {self.current_skill}")
+            self.load_model()
+            response.success = True
+            response.message = f"Successfully loaded skill: {self.current_skill}"
+            self.get_logger().info(response.message)
+        except Exception as exc:
+            response.success = False
+            response.message = f"Failed to load skill: {str(exc)}"
+            self.get_logger().error(response.message)
+        
         return response
 
     def _control_step(self):
@@ -936,7 +987,7 @@ class ImitationMoveitControl(Node):
 
 
         
-        num_predicted_actions = 1
+        num_predicted_actions = 20
         action_sequence_length = 20
         num_steps = 100
         action_dim = 7
@@ -997,9 +1048,8 @@ class ImitationMoveitControl(Node):
             print("------------------")
         
        # actions = x[].cpu().numpy()[:, :7]
-        # random_idx = random.randint(0, num_predicted_actions - 1)
-        # idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
-        idx = 0
+        random_idx = random.randint(0, num_predicted_actions - 1)
+        idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
         
         actions = x[idx].cpu().numpy()[:, :7]
         # print("Selected action sequence: ", actions / 150.0)
@@ -1008,7 +1058,7 @@ class ImitationMoveitControl(Node):
         # joint_actions = executed_actions[:, :6] * np.pi / 180.0
         # executed_actions[:, :6] = executed_actions[:, :6] / 150.0
         print("chosen action  : ", executed_actions/2.0) 
-        input("Press Enter to execute the above action sequence...")
+    #    input()
         # print("")
         
         return executed_actions.tolist()

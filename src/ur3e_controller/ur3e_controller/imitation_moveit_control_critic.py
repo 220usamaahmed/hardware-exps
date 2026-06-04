@@ -24,6 +24,237 @@ from collections import deque
 
 np.set_printoptions(suppress=True)
 torch.set_printoptions(precision=4, sci_mode=False)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+##### Critic code
+
+@dataclass
+class TrainConfig:
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    seed: int = 42
+
+    d_vis: int = 512
+    d_nonvis: int = 7
+    d_act: int = 7
+
+    d_model: int = 256
+    n_heads: int = 8
+    n_layers: int = 2
+    dropout: float = 0.1
+
+    hist_len: int = 5
+    horizon: int = 20
+
+    batch_size: int = 1024
+    lr: float = 3e-4
+    weight_decay: float = 1e-4
+    grad_clip_norm: float = 1.0
+    num_epochs: int = 50
+
+    gamma: float = 0.99
+    num_action_samples: int = 20
+    target_ema_tau: float = 0.005
+
+    log_every: int = 50
+    ckpt_every_steps: int = 2
+    out_dir: str = "./q_training_runs/run_small_dataset"
+
+
+class QTransformer(nn.Module):
+    def __init__(
+        self,
+        d_vis: int,
+        d_nonvis: int,
+        d_act: int,
+        d_model: int,
+        n_heads: int,
+        n_layers: int,
+        dropout: float,
+        hist_len: int = 5,
+        horizon: int = 20,
+    ):
+        super().__init__()
+        self.hist_len = hist_len
+        self.horizon = horizon
+        self.num_tokens = 2 * hist_len + horizon
+
+        self.depth_proj = nn.Linear(d_vis, d_model)
+
+        self.nonvis_proj = nn.Linear(d_nonvis, d_model)
+        self.act_proj = nn.Linear(d_act, d_model)
+
+       # self.pos_emb = nn.Parameter(torch.zeros(1, self.num_tokens, d_model))
+        #nn.init.trunc_normal_(self.pos_emb, std=0.02)
+        self.pos_emb=SinusoidalPositionalEncoding(d_model, max_len=self.num_tokens)
+      #  print("d_model in Q transformer == ", d_model)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=4 * d_model,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            #norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+
+        self.dropout = nn.Dropout(dropout)
+        self.q_head = nn.Sequential(
+        #    nn.LayerNorm(d_model),
+            nn.Linear(d_model, int(d_model/4)),
+            nn.GELU(),
+            nn.Linear(int(d_model/4), 1),
+        )
+
+    def forward(self, depth_hist: torch.Tensor,  nonvis_hist: torch.Tensor, act_seq: torch.Tensor) -> torch.Tensor:
+        B = depth_hist.shape[0]
+    #    print("Visual history shape in Q transformer == ", vis_hist.shape)
+     #   print("Non visual history shape in Q transformer == ", nonvis_hist.shape)
+        depth_tok = self.depth_proj(depth_hist)
+
+        nonvis_tok = self.nonvis_proj(nonvis_hist)
+
+        state_tokens = torch.stack([depth_tok,  nonvis_tok], dim=2)
+        state_tokens = state_tokens.view(B, 2 * self.hist_len, -1)
+
+
+
+       # print("Action sequence shape in Q transformer == ", act_seq.shape)
+        act_tokens = self.act_proj(act_seq)
+       # print("Projected action sequence shape in Q transformer == ", act_tokens.shape)
+
+        x = torch.cat([state_tokens, act_tokens], dim=1)
+       # print("Transformer input sequence shape in Q transformer == ", x.shape)
+        x=self.pos_emb(x)
+        #x = x + self.pos_emb
+      #  x = self.dropout(x)
+
+        h = self.encoder(x)
+     #   print("original output of the q transformer == " , h.shape)
+        pooled = h.mean(dim=1)
+      #  print("pooled output of the q transformer == " , pooled.shape)
+        q = self.q_head(pooled).squeeze(-1)
+      #  print("final Q values shape in Q transformer == " , q.shape)
+       # input()
+        return q
+
+
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        
+        pe = torch.zeros(max_len, d_model)                     # (max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)       # (max_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )                                                      # (d_model/2)
+
+        pe[:, 0::2] = torch.sin(position * div_term)           # Apply sin to even indices
+        pe[:, 1::2] = torch.cos(position * div_term)           # Apply cos to odd indices
+        pe = pe.unsqueeze(0)                                   # Shape: (1, max_len, d_model)
+
+        self.register_buffer('pe', pe)  # Not a parameter, but saved with the model
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape (batch_size, seq_len, d_model)
+        Returns:
+            Tensor of shape (batch_size, seq_len, d_model) with positional encoding added
+        """
+        return x + self.pe[:, :x.size(1), :].to(x.device)
+
+class ModelWrapper():
+    def __init__(self):        
+       # self.diffusion_policy = ConditionalDiffusionModel()
+    #    self.diffusion_policy.load_state_dict(torch.load(path.join(Diffusion_model_path,"pretrained_visual_encoder_2200.pt"),
+     #                                                       map_location=device))
+
+        #self.diffusion_policy.to(device)
+        #self.diffusion_policy.eval()
+        #for p in self.diffusion_policy.parameters():
+         #   p.requires_grad_(False)
+        #self.scheduler = NoiseScheduler()
+
+        cfg = TrainConfig()
+        self.q_value_network = QTransformer(
+            d_vis=cfg.d_vis,
+            d_nonvis=cfg.d_nonvis,
+            d_act=cfg.d_act,
+            d_model=cfg.d_model,
+            n_heads=cfg.n_heads,
+            n_layers=cfg.n_layers,
+            dropout=cfg.dropout,
+            hist_len=cfg.hist_len,
+            horizon=cfg.horizon,
+        ).to(cfg.device)
+        # ckpt = torch.load('/home/user/siddiquieu1/HRL-Usama/mobile-manipulation/ahmed_checkpoints/ckpt_step_4500.pt', map_location="cpu")
+        # self.q_value_network.load_state_dict(ckpt["q_state_dict"]) 
+        self.q_value_network = self.q_value_network.to(device)
+      #  self.q_value_network.eval()
+    '''
+    def sample(self, visual_obs, non_visual_obs):
+        # print(visual_obs.shape)
+        # print(non_visual_obs.shape)
+        # exit()
+
+        shape = (20, 20, 10)
+        with torch.no_grad():
+            actions = self.scheduler.sample(self.diffusion_policy, shape, visual_obs.to(device).to(torch.float32), non_visual_obs.to(device).to(torch.float32), device, num_random_samples=20)
+
+        return actions
+    '''
+    def calculateQ(self, depth_states, non_visual_states, actions):
+
+        q_values = self.q_value_network(depth_states.to(device).to(torch.float32), non_visual_states.to(device).to(torch.float32), actions.to(device).to(torch.float32))
+
+        return q_values
+
+
+def best_traj_q_value(flow_matching_policy, q_value_network, depth_obs , non_visual_obs_buffer, actions):
+
+
+    depth_obs=torch.from_numpy(depth_obs).to(device)
+    non_visual_obs_buffer=torch.from_numpy(non_visual_obs_buffer).to(device).to(torch.float32)
+    if len(depth_obs.shape)==5:
+        depth_obs=flow_matching_policy.depth_encoder(rearrange(depth_obs, 'b s c h w -> (b s) c h w'))
+
+
+    elif len(depth_obs.shape)==4:
+
+        depth_obs=flow_matching_policy.depth_encoder(depth_obs)
+        
+    depth_obs = depth_obs.reshape(20, 5, 512)
+
+
+    num_trajectories=actions.shape[0]
+    
+    # depth_obs=depth_obs.repeat(num_trajectories,1,1)
+    # non_visual_obs_buffer=non_visual_obs_buffer.repeat(num_trajectories,1,1)
+
+    # print("depth_obs shape in best_traj_q_value == ", depth_obs.shape)
+    # print("non_visual_obs_buffer shape in best_traj_q_value == ", non_visual_obs_buffer.shape)
+    # print("actions shape in best_traj_q_value == ", actions.shape)
+
+    with torch.no_grad():
+        q_values=q_value_network(depth_obs, non_visual_obs_buffer, actions)
+
+
+    print("Q values for the sampled trajectories: ", q_values.cpu().numpy())
+
+    best_traj_idx=torch.argmax(q_values.squeeze(-1))
+ 
+
+    return best_traj_idx
+    
+
+
+#################
+
+
 
 class Flatten(nn.Module):
     r"""Copied from torch 1.9."""
@@ -374,9 +605,9 @@ class ImitationMoveitControl(Node):
         def to_rad(waypoint_deg):
             return [math.radians(angle_deg) for angle_deg in waypoint_deg]
         
-        home_noise_deviations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        home_noise_deviations = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
         home = [-0.00, -90.00, 0.00, -90.00, 0.00, 90.00]
-        # home = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
+      #  home = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
         home = to_rad(home)
         
         self.moveit2.move_to_configuration(home, self._joint_names, tolerance=0.005)
@@ -413,20 +644,29 @@ class ImitationMoveitControl(Node):
         
     def load_model(self):
         self.flow_matching_policy=ConditionalDiffusionModel()
-  
-        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights2/flow_matching_real_world_all_tasks_early_stop_for_depth_100.pt", map_location=self.device)
-        
-        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights_31_may/open_drawer_new_setup/flow_matching_manuaaly_processed_quantized_depth_images_without_early_stopping_epochs_ep_450.pt", map_location=self.device)
-        # check_point=torch.load("/home/shokry/ur3e-trajectories/weights_31_may/open_drawer_old_setup_manually_randomized_box_pos/flow_matching_real_world_all_tasks_early_stop_for_depth_150.pt", map_location=self.device)
-        check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_all_skills_marvin_ep_3950.pt", map_location=self.device)
+        fm_check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_all_skills_marvin_ep_3200.pt", map_location=self.device)
         
         print("Loading flow matching policy from checkpoint")
         
-        self.flow_matching_policy.load_state_dict(check_point['model'])
+        self.flow_matching_policy.load_state_dict(fm_check_point['model'])
         self.flow_matching_policy.to(self.device)
         self.flow_matching_policy.eval()
         for p in self.flow_matching_policy.parameters():
             p.requires_grad_(False)
+            
+        self.critic_model=QTransformer(
+            d_vis=TrainConfig.d_vis,
+            d_nonvis=TrainConfig.d_nonvis,
+            d_act=TrainConfig.d_act,
+            d_model=TrainConfig.d_model,
+            n_heads=TrainConfig.n_heads,
+            n_layers=TrainConfig.n_layers,
+            dropout=TrainConfig.dropout,
+            hist_len=TrainConfig.hist_len,
+            horizon=TrainConfig.horizon,    
+        ).to(self.device)
+        critic_check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/ckpt_with_normalization_wit_MC_uncertainty_discount_factor_99_all_skills_epoch_3200_original_propagation_ep_750.pt", map_location=self.device)
+        self.critic_model.load_state_dict(critic_check_point['q_state_dict'])
         
         
     def _stamp_to_sec(self, stamp) -> float:
@@ -936,7 +1176,7 @@ class ImitationMoveitControl(Node):
 
 
         
-        num_predicted_actions = 1
+        num_predicted_actions = 20
         action_sequence_length = 20
         num_steps = 100
         action_dim = 7
@@ -996,24 +1236,17 @@ class ImitationMoveitControl(Node):
             print(x[i])#/150.0)
             print("------------------")
         
-       # actions = x[].cpu().numpy()[:, :7]
-        # random_idx = random.randint(0, num_predicted_actions - 1)
-        # idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
-        idx = 0
+        selected_idx = best_traj_q_value(self.flow_matching_policy, self.critic_model, depth_images.cpu().numpy(), non_visual_obs.cpu().numpy(), x)
         
-        actions = x[idx].cpu().numpy()[:, :7]
-        # print("Selected action sequence: ", actions / 150.0)
-      #  if self.flow_matching_policy.inference_step > 3:
+        print("Selected trajectory index: ", selected_idx)
+        
+        actions = x[selected_idx].cpu().numpy()[:, :7]
         executed_actions = actions[:10, :]*2.0
-        # joint_actions = executed_actions[:, :6] * np.pi / 180.0
-        # executed_actions[:, :6] = executed_actions[:, :6] / 150.0
+
         print("chosen action  : ", executed_actions/2.0) 
-        input("Press Enter to execute the above action sequence...")
-        # print("")
+        input()
         
         return executed_actions.tolist()
-
-        return actions.tolist()
 
 
 def main(args=None) -> None:

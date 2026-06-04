@@ -62,3 +62,8 @@ Gripper state (manual input)
 ```bash
 ros2 service call /set_observation_gripper_state std_srvs/srv/SetBool "{data: true}"
 ```
+
+
+ros2 param set /imitation_moveit_control next_skill "pick" && ros2 service call /set_skill std_srvs/srv/SetBool "{data: true}"
+
+ros2 bag record -o /home/shokry/ur3e-trajectories/exports/zed_depth_video --compression-mode file --compression-format zstd /zed/zed_node/depth/depth_registered

@@ -104,7 +104,7 @@ class TrajectoryControl(Node):
         self.noise_counter = 0
         self.additive_noise = [0.0] * 6  # Initialize additive noise for each joint
         self.noise_direction = [1] * 6  # Direction of noise change for each joint (1 or -1)
-        self.noise_counter_max = 1000
+        # self.noise_counter_max = 1000
 
         # ROS interfaces
         self._joint_cmd_pub = self.create_publisher(JointJog, self._command_topic, 10)
@@ -149,6 +149,10 @@ class TrajectoryControl(Node):
         self.get_logger().info(
             f"TrajectoryControl ready. Publishing joint commands on {self._command_topic} now"
         )
+        
+        self.max_error = 0.0
+        self.current_max_error = 0.0
+        self.apply_deviation = False
 
     def _publish_gripper_state(self, state: int) -> None:
         msg = UInt8()
@@ -209,7 +213,7 @@ class TrajectoryControl(Node):
         random.seed(time.time())
 
         # Waypoints are specified in degrees and converted to radians.
-        home_noise_deviations = [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        home_noise_deviations = [7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
         
         home = [-90.00, 0.00, -90.00, 0.00, 90.00, -0.00]
         home_with_noise = [angle + random.uniform(-deviation, deviation) for angle, deviation in zip(home, home_noise_deviations)]
@@ -415,51 +419,30 @@ class TrajectoryControl(Node):
             "gripping_1": [-61.13, 70.20, -99.37, -89.32, 88.80, 72.07],
         }
         
-        #gripper_choice = random.choice([grip_0, grip_1, grip_2])
-        gripper_choice = random.choice([grip_center])
-        # print("Selected gripper trajectory:")
-        # for key, value in gripper_choice.items():
-        #     print(f"  {key}: {value}")
+        grip_center = {
+            "gripping_prepare": [-61.30, 53.02, -82.03, -89.31, 88.72, 72.04],
+            "gripping": [-61.13, 70.20, -99.37, -89.32, 88.80, 72.07],
+            
+            "gripping_prepare_1": [-120.02, -51.74, -98.13, 90.07, 88.82, -72.64],
+            "gripping_1": [-120.04, -68.39, -81.47, 90.08, 88.84, -72.65],
+        }
         
-        # gripper_choice = grip_0
+        grip_green = {
+            "gripping_prepare": [-61.82, 57.64, -86.42, -89.03, 89.67, 72.77],
+            "gripping": [-61.26, 70.09, -99.44, -89.04, 89.73, 72.80],
+            
+            "gripping_prepare_1": [-120.21, -49.75, -99.67, 89.79, 89.69, -71.55],
+            "gripping_1": [-119.86, -68.00, -81.79, 89.80, 89.71, -71.57],
+        }
+        
+        gripper_choice = random.choice([grip_green])
+        
+        # gripping_prepare = gripper_choice["gripping_prepare"]
+        # gripping = gripper_choice["gripping"]
         
         gripping_prepare = gripper_choice["gripping_prepare_1"]
         gripping = gripper_choice["gripping_1"]
-        
-        # gripping_prepare = gripper_choice["gripping_prepare_1"]
-        # gripping = gripper_choice["gripping_1"]
-        
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        # ]
-        
-        # Picking 
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
-            
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
-        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
-            
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/pick25/pick"),
-        # ]
-        
-   #     gripping_pull_1 = gripper_choice["gripping_pull_1"]
-   #     gripping_pull_2 = gripper_choice["gripping_pull_2"]
-    #    gripping_pull_3 = gripper_choice["gripping_pull_3"]
-        
-        reset_pose = grip_0["gripping_pull_3"]
-        #reset_pose[5] = 4.0
-        reset_pose[5] = 0.0
+    
         ## Pick and place left drawer
         
         lift = [-107.66, -23.45, -139.67, 90.22, 0.21, -64.52]
@@ -489,9 +472,9 @@ class TrajectoryControl(Node):
         # pick = [-108.64, -85.47, -75.10, 89.75, 9.77, -63.36] # Left
         pick = [-108.02, -86.21, -74.57, 89.66, -5.45, -78.61] # Right
 
-        # return [
-        #    Step(kind="waypoint", waypoint=to_rad(home)),
-        # ]
+        return [
+           Step(kind="waypoint", waypoint=to_rad(gripping)),
+        ]
         
         # drop = [-117.81, -51.64, -88.21, 87.26, 80.07, -44.76]
         drop = [-55.11, 31.30, -74.43, -83.17, 89.97, 42.98]
@@ -502,42 +485,12 @@ class TrajectoryControl(Node):
         #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
         # ]
         
-        # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="reset_noise"),
-            
-        #     Step(kind="recorder_start"),
-        #     Step(kind="wait", wait_sec=1.0),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(w1)),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(grip)),
-        #     Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-        #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(w1)),
-        #     Step(kind="waypoint", waypoint=to_rad(w2)),
-        #     Step(kind="waypoint", waypoint=to_rad(w3)),
-        #     Step(kind="waypoint", waypoint=to_rad(w4)),
-            
-        #     Step(kind="reset_noise"),
-            
-        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
-            
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/drawer/open_right/open_right"),
-            
-        #     Step(kind="hold")
-        # ] * 8
-        
         # Left 1            
-        grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
-        w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
-        w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
-        w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
-        w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
+        # grip = [-128.98, -74.22, -158.44, -31.19, 90.0, -32.55]
+        # w1 = [-123.18, -84.32, -154.35, -26.44, 90.0, -27.81]
+        # w2 = [-117.50, -93.28, -151.13, -20.86, 90.65, -22.18]
+        # w3 = [-110.88, -103.58, -148.70, -11.79, 91.94, -13.12]
+        # w4 = [-108.18, -107.64, -150.28, -5.93, 94.92, -7.26]
         
         # Left 2
         # grip = [-131.76, -68.77, -160.65, -30.05, 89.94, -31.39]
@@ -554,11 +507,11 @@ class TrajectoryControl(Node):
         # w4 = [-102.65, -115.16, -146.02, -6.86, 92.63, -8.27]
         
         # Right 1
-        # grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
-        # w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
-        # w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
-        # w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
-        # w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
+        grip = [-52.82, 77.41, -28.14, 30.39, 88.09, 30.74]
+        w1 = [-59.32, 88.58, -33.56, 24.85, 88.88, 25.21]
+        w2 = [-64.83, 97.60, -38.28, 19.11, 90.15, 19.47]
+        w3 = [-71.86, 108.52, -46.26, 10.81, 94.31, 11.14]
+        w4 = [-77.05, 116.86, -58.34, 5.60, 103.29, 5.79]
         
         # Right 2
         # grip = [-56.51, 83.31, -30.63, 32.13, 87.73, 32.49]
@@ -664,6 +617,51 @@ class TrajectoryControl(Node):
         #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/place_right3/place_right"),
         # ]
         
+        
+        # Place
+        # return [
+        #     Step(kind="waypoint", waypoint=to_rad(home)),
+            
+        #     Step(kind="recorder_start"),
+        #     Step(kind="wait", wait_sec=1.0),
+            
+        #     Step(kind="reset_noise"),
+        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
+        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
+        #     Step(kind="waypoint", waypoint=to_rad(hover_over_left)),
+        #     Step(kind="waypoint", waypoint=to_rad(put_in_left)),
+            
+        #     Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            
+        #     Step(kind="reset_noise"),
+        #     Step(kind="waypoint", waypoint=to_rad(home)),
+            
+        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/place_right/place_right"),
+        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/place_left/place_left"),
+        # ]
+        
+        
+        # Pick
+        return [
+            Step(kind="waypoint", waypoint=to_rad(home_with_noise)),
+            
+            Step(kind="recorder_start"),
+            Step(kind="wait", wait_sec=1.0),
+            
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
+            Step(kind="waypoint", waypoint=to_rad(gripping)),
+            
+            Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
+            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(home)),
+            
+            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/pick2/pick"),
+        ]
+        
+        # Drawer
         return [
             Step(kind="waypoint", waypoint=to_rad(home)),
             
@@ -672,24 +670,26 @@ class TrajectoryControl(Node):
             
             Step(kind="reset_noise"),
             Step(kind="waypoint", waypoint=to_rad(w1)),
-            # Step(kind="waypoint", waypoint=to_rad(grip)),
+            Step(kind="waypoint", waypoint=to_rad(grip)),
             
-            # # Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
-            # # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            Step(kind="gripper", gripper_command="grip", wait_sec=1.0),
+            Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             # Step(kind="wait", wait_sec=1.0),
             
-            # Step(kind="waypoint", waypoint=to_rad(w1)),
-            # Step(kind="waypoint", waypoint=to_rad(w2)),
-            # Step(kind="waypoint", waypoint=to_rad(w3)),
-            # Step(kind="waypoint", waypoint=to_rad(w4)),
+            Step(kind="waypoint", waypoint=to_rad(w1)),
+            Step(kind="waypoint", waypoint=to_rad(w2)),
+            Step(kind="waypoint", waypoint=to_rad(w3)),
+            Step(kind="waypoint", waypoint=to_rad(w4)),
             
-            # # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
             # Step(kind="wait", wait_sec=0.1),
             
-            # Step(kind="waypoint", waypoint=to_rad(home)),
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(home)),
             
             Step(
-                kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/test/open_left/open_left"
+                # kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/test/open_left/open_left"
+                kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/open_right/open_right"
             ),
         ]
             
@@ -967,6 +967,9 @@ class TrajectoryControl(Node):
             errors.append(e * error_scalling[i])
             max_err = max(max_err, abs(e))
             
+        self.max_error = max(self.max_error, max_err)
+        self.current_max_error = max_err
+            
         # self.noise_counter = max(0, self.noise_counter - 1)
 
         # Check if the target is reached
@@ -979,13 +982,15 @@ class TrajectoryControl(Node):
                 self._advance_after_wait = True
                 self._publish_joint_command([0.0] * len(self._joint_names))
                 return
+            self.apply_deviation = False
             self._current_step_index += 1
             return
 
         # Normalize velocities so all joints finish at the same time
         velocities: List[float] = []
         for e in errors:
-            normalized_speed = (abs(e) / max_err) * self._max_joint_speed * 0.8 if max_err > 0 else 0.0
+            a = 1.0 if not self.apply_deviation else 0.8
+            normalized_speed = (abs(e) / max_err) * self._max_joint_speed * a if max_err > 0 else 0.0
             v = math.copysign(normalized_speed, e)
 
             # Clamp each joint speed
@@ -1004,10 +1009,12 @@ class TrajectoryControl(Node):
     
     def _reset_noise(self) -> None:
         print("Resetting velocity noise...")
-        self.noise_counter = self.noise_counter_max
-        self.additive_noise = [random.uniform(0.15, 0.85) for _ in self._joint_names]
+        # self.noise_counter = self.noise_counter_max
+        self.additive_noise = [random.uniform(0.1, 0.60) for _ in self._joint_names]
         self.noise_direction = [random.choice([-1, 1]) for _ in self._joint_names]
         # self.additive_noise = [0, 0, 0, 0, 0, 0]
+        
+        self.apply_deviation = True
     
 
     def _handle_gripper_step(self, step: Step) -> None:
@@ -1139,18 +1146,27 @@ class TrajectoryControl(Node):
         #         noisy_v = math.copysign(self._max_joint_speed, noisy_v)
         #     noisy.append(noisy_v)
             
-        x = self.noise_counter / self.noise_counter_max
+        # x = self.noise_counter / self.noise_counter_max
+        
+        if not self.apply_deviation:
+            return velocities
+        
+        x = self.current_max_error / self.max_error if self.max_error > 0 else 0.0
+        x = min(max(x, 0.0), 1.0)
+        x = 1 - x
+        
         p = self.additive_noise
         
         y = np.pow(x, np.log(0.5) / np.log(p))
-        n = np.square(np.sin(np.pi * y))
+        n = np.pow(np.sin(np.pi * y), 4)
         
         self.noise_counter = max(0, self.noise_counter - 1)
         
-        print(f"Noise counter: {self.noise_counter}, n: {np.round(n, 3)}, velocities: {velocities}")
+        # print(f"Noise counter: {self.noise_counter}, n: {np.round(n, 3)}, velocities: {velocities}")
+        print(f"X={x:.2f}, n={np.round(n, 3)}")
         
         for i, v in enumerate(velocities):
-            noisy_v = v + 0.2 * n[i] * self.noise_direction[i]
+            noisy_v = v + 0.2 * self._max_joint_speed * n[i] * self.noise_direction[i]
             noisy.append(noisy_v)
             if abs(noisy_v) > self._max_joint_speed > 0.0:
                 noisy_v = math.copysign(self._max_joint_speed, noisy_v)
