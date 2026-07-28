@@ -94,7 +94,7 @@ class TrajectoryControl(Node):
         self._gripper_future: Optional[rclpy.task.Future] = None
         self._gripper_wait_sec = 0.0
         self._last_vel_log_sec: Optional[float] = None
-        self._gripper_state = 0.0
+        self._gripper_state = 1.0
         self._current_segment_id = 0
         self._recorder_start_timer = None
         self._recorder_stop_future: Optional[rclpy.task.Future] = None
@@ -437,11 +437,11 @@ class TrajectoryControl(Node):
         
         gripper_choice = random.choice([grip_green])
         
-        # gripping_prepare = gripper_choice["gripping_prepare"]
-        # gripping = gripper_choice["gripping"]
+        gripping_prepare = gripper_choice["gripping_prepare"]
+        gripping = gripper_choice["gripping"]
         
-        gripping_prepare = gripper_choice["gripping_prepare_1"]
-        gripping = gripper_choice["gripping_1"]
+        # gripping_prepare = gripper_choice["gripping_prepare_1"]
+        # gripping = gripper_choice["gripping_1"]
     
         ## Pick and place left drawer
         
@@ -472,9 +472,9 @@ class TrajectoryControl(Node):
         # pick = [-108.64, -85.47, -75.10, 89.75, 9.77, -63.36] # Left
         pick = [-108.02, -86.21, -74.57, 89.66, -5.45, -78.61] # Right
 
-        return [
-           Step(kind="waypoint", waypoint=to_rad(gripping)),
-        ]
+        # return [
+        #     Step(kind="waypoint", waypoint=to_rad(gripping)),
+        # ]
         
         # drop = [-117.81, -51.64, -88.21, 87.26, 80.07, -44.76]
         drop = [-55.11, 31.30, -74.43, -83.17, 89.97, 42.98]
@@ -528,61 +528,64 @@ class TrajectoryControl(Node):
         # w4 = [-72.21, 109.41, -54.23, 6.86, 101.31, 7.04]
         
         # return [
-        #     Step(kind="waypoint", waypoint=to_rad(home)),
-        #     Step(kind="wait", wait_sec=1.0),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="wait", wait_sec=1.0),
             
-        #     # Step(kind="recorder_start"),
-        #     # Step(kind="wait", wait_sec=1.0),
+            # Step(kind="recorder_start"),
+            # Step(kind="wait", wait_sec=1.0),
             
-        #     # # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(w1)),
+            # Step(kind="reset_noise"),
+            # Step(kind="waypoint", waypoint=to_rad(w1)),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(grip)),
-        #     # Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
-        #     # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
+            # Step(kind="waypoint", waypoint=to_rad(grip)),
+            # Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
+            # Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-        #     # Step(kind="waypoint", waypoint=to_rad(w1)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w2)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w3)),
-        #     # Step(kind="waypoint", waypoint=to_rad(w4)),
+            # Step(kind="waypoint", waypoint=to_rad(w1)),
+            # Step(kind="waypoint", waypoint=to_rad(w2)),
+            # Step(kind="waypoint", waypoint=to_rad(w3)),
+            # Step(kind="waypoint", waypoint=to_rad(w4)),
             
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
             
-        #     # # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
+            # Step(kind="reset_noise"),
+            # Step(kind="waypoint", waypoint=to_rad(home)),
             
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/open_left/open_left"),
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/open_right/open_right"),
-            
+            # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/open_right/open_right")
+        # ]
+        
+        # return [            
         #     Step(kind="recorder_start"),
         #     Step(kind="wait", wait_sec=1.0),
             
-        #     # Step(kind="reset_noise"),
+        #     Step(kind="reset_noise"),
         #     Step(kind="waypoint", waypoint=to_rad(gripping_prepare)),
         #     Step(kind="waypoint", waypoint=to_rad(gripping)),
             
         #     Step(kind="gripper", gripper_command="grip", wait_sec=0.3),
         #     Step(kind="gripper", gripper_command="release", wait_sec=0.1),
             
-        #     # Step(kind="reset_noise"),
+        #     Step(kind="reset_noise"),
         #     Step(kind="waypoint", waypoint=to_rad(home)),
             
-        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may26/pick/pick"),
+        #     Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/pick/pick"),
+        # ]    
+        
+        return [
+            Step(kind="recorder_start"),
+            Step(kind="wait", wait_sec=1.0),
             
-        #     # Step(kind="recorder_start"),
-        #     # Step(kind="wait", wait_sec=1.0),
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
+            Step(kind="waypoint", waypoint=to_rad(put_in_right)),
             
-        #     # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(hover_over_right)),
-        #     # Step(kind="waypoint", waypoint=to_rad(put_in_right)),
+            Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
             
-        #     # Step(kind="gripper", gripper_command="blow", wait_sec=0.1),
+            Step(kind="reset_noise"),
+            Step(kind="waypoint", waypoint=to_rad(home)),
             
-        #     # Step(kind="reset_noise"),
-        #     # Step(kind="waypoint", waypoint=to_rad(home)),
-            
-        #     # Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/coombined/place_right/place_right"),
-        # ]
+            Step(kind="recorder_stop", output_dir="/home/shokry/ur3e-trajectories/may30/place_right/place_right"),
+        ]
         
         """
         0: Not yet set

@@ -3,6 +3,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Sequence, Tuple
+import time
 
 import cv2
 import numpy as np
@@ -21,11 +22,12 @@ from pymoveit2 import MoveIt2
 import threading
 from collections import deque
 
-
 np.set_printoptions(suppress=True)
 torch.set_printoptions(precision=4, sci_mode=False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# np.random.seed(100)
+# torch.manual_seed(100)
 
 ##### Critic code
 
@@ -665,7 +667,8 @@ class ImitationMoveitControl(Node):
             hist_len=TrainConfig.hist_len,
             horizon=TrainConfig.horizon,    
         ).to(self.device)
-        critic_check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/ckpt_with_normalization_wit_MC_uncertainty_discount_factor_99_all_skills_epoch_3200_original_propagation_ep_750.pt", map_location=self.device)
+        # critic_check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/ckpt_with_normalization_wit_MC_uncertainty_discount_factor_99_all_skills_epoch_3200_original_propagation_ep_750.pt", map_location=self.device)
+        critic_check_point=torch.load("/home/shokry/ur3e-trajectories/weights_june_2/ckpt_with_normalization_wit_MC_uncertainty_discount_factor_99_all_skills_epoch_3200_original_propagation_right_drawer_ep_1950.pt", map_location=self.device)
         self.critic_model.load_state_dict(critic_check_point['q_state_dict'])
         
         
@@ -759,7 +762,7 @@ class ImitationMoveitControl(Node):
         
         duration = end_time - start_time
         time_delta = duration / 10
-    #    print("time delta: ", time_delta)
+        print("time delta: ", time_delta)
         
         
         
@@ -881,11 +884,14 @@ class ImitationMoveitControl(Node):
             self._start_grip_sequence()
         else:
             self._send_gripper_command("blow")
+            self._obs_gripper_state = 0.0
             
     def _start_grip_sequence(self) -> None:
         # print("Starting gripper sequence: GRIP")
         
         self._gripper_sequence_active = True
+        
+        self._obs_gripper_state = 1.0
         
         if not self._send_gripper_command("grip"):
             self._prev_gripper_state = None
@@ -1046,6 +1052,8 @@ class ImitationMoveitControl(Node):
         
         print("Model input:")
         print(non_visual_obs)
+        
+        start_time = time.perf_counter()
 
 
 
@@ -1119,6 +1127,8 @@ class ImitationMoveitControl(Node):
             
         second_drawer_start_x=0
         second_drawer_start_y=140
+# np.random.seed(100)
+# torch.manual_seed(100)
         second_drawer_end_x=41
         second_drawer_end_y=210
         
@@ -1241,10 +1251,15 @@ class ImitationMoveitControl(Node):
         print("Selected trajectory index: ", selected_idx)
         
         actions = x[selected_idx].cpu().numpy()[:, :7]
-        executed_actions = actions[:10, :]*2.0
+        executed_actions = actions[:10, :] * 2.0
 
         print("chosen action  : ", executed_actions/2.0) 
-        input()
+        
+        end_time = time.perf_counter()
+
+        elapsed_time = end_time - start_time
+        print(f"Time taken: {elapsed_time:.6f} seconds")
+        # input()
         
         return executed_actions.tolist()
 

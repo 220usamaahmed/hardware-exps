@@ -363,12 +363,12 @@ class ImitationMoveitControl(Node):
         self.model_paths = {
             "open_drawer_left": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_open_left_marvin_ep_7500.pt",
             "open_drawer_right": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_open_right_marvin_ep_7500.pt",
-            "pick": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_pick_marvin_ep_7300.pt",
+            "pick": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_pick_marvin_ep_1000.pt",
             "place_left": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_place_left_marvin_ep_7500.pt",
             "place_right": root + "/flow_matching_manually_processed_depth_images_with_percentile_masks_corrected_box_pos_place_right_marvin_ep_7500.pt",
         }
         
-        self.current_skill = "open_drawer_left"
+        self.current_skill = "pick"
         
         self.load_model()
         
@@ -693,10 +693,14 @@ class ImitationMoveitControl(Node):
         else:
             self._send_gripper_command("blow")
             
+            self._obs_gripper_state = 0.0
+            
     def _start_grip_sequence(self) -> None:
         # print("Starting gripper sequence: GRIP")
         
         self._gripper_sequence_active = True
+        
+        self._obs_gripper_state = 1.0
         
         if not self._send_gripper_command("grip"):
             self._prev_gripper_state = None
@@ -987,7 +991,7 @@ class ImitationMoveitControl(Node):
 
 
         
-        num_predicted_actions = 20
+        num_predicted_actions = 1
         action_sequence_length = 20
         num_steps = 100
         action_dim = 7
@@ -1048,17 +1052,19 @@ class ImitationMoveitControl(Node):
             print("------------------")
         
        # actions = x[].cpu().numpy()[:, :7]
-        random_idx = random.randint(0, num_predicted_actions - 1)
-        idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
+        # random_idx = random.randint(0, num_predicted_actions - 1)
+        # idx = int(input(f"Select action sequence to execute (0-{num_predicted_actions - 1}): ").strip() or random_idx)
+        
+        idx = 0
         
         actions = x[idx].cpu().numpy()[:, :7]
         # print("Selected action sequence: ", actions / 150.0)
       #  if self.flow_matching_policy.inference_step > 3:
-        executed_actions = actions[:10, :]*2.0
+        executed_actions = actions[:10, :] * 2.0
         # joint_actions = executed_actions[:, :6] * np.pi / 180.0
         # executed_actions[:, :6] = executed_actions[:, :6] / 150.0
         print("chosen action  : ", executed_actions/2.0) 
-    #    input()
+        # input("Press Enter to execute the above action sequence...")
         # print("")
         
         return executed_actions.tolist()

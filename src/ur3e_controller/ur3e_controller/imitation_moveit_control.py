@@ -25,6 +25,10 @@ from collections import deque
 np.set_printoptions(suppress=True)
 torch.set_printoptions(precision=4, sci_mode=False)
 
+
+np.random.seed(1231)
+torch.manual_seed(1231)
+
 class Flatten(nn.Module):
     r"""Copied from torch 1.9."""
     __constants__ = ["start_dim", "end_dim"]
@@ -641,11 +645,14 @@ class ImitationMoveitControl(Node):
             self._start_grip_sequence()
         else:
             self._send_gripper_command("blow")
+            self._obs_gripper_state = 0.0
             
     def _start_grip_sequence(self) -> None:
         # print("Starting gripper sequence: GRIP")
         
         self._gripper_sequence_active = True
+        
+        self._obs_gripper_state = 1.0
         
         if not self._send_gripper_command("grip"):
             self._prev_gripper_state = None
@@ -990,11 +997,11 @@ class ImitationMoveitControl(Node):
         
         
         #actions = x.squeeze(0).cpu().numpy()[:, :7]
-        print("inferred actions == " )
-        for i in range(num_predicted_actions):
-            print(f"Action sequence {i}:")
-            print(x[i])#/150.0)
-            print("------------------")
+        # print("inferred actions == " )
+        # for i in range(num_predicted_actions):
+        #     print(f"Action sequence {i}:")
+        #     print(x[i])#/150.0)
+        #     print("------------------")
         
        # actions = x[].cpu().numpy()[:, :7]
         # random_idx = random.randint(0, num_predicted_actions - 1)
@@ -1008,7 +1015,7 @@ class ImitationMoveitControl(Node):
         # joint_actions = executed_actions[:, :6] * np.pi / 180.0
         # executed_actions[:, :6] = executed_actions[:, :6] / 150.0
         print("chosen action  : ", executed_actions/2.0) 
-        input("Press Enter to execute the above action sequence...")
+        # input("Press Enter to execute the above action sequence...")
         # print("")
         
         return executed_actions.tolist()
